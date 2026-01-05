@@ -3,6 +3,8 @@ package runtime
 import (
 	"fmt"
 	"sync"
+
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 // RuntimeName identifies a runtime implementation.
@@ -49,6 +51,11 @@ func SetActive(name RuntimeName) error {
 // Initialize sets up the default runtimes in the global registry.
 func Initialize() {
 	globalRegistry.Initialize()
+}
+
+// InitializeWithConfig sets up runtimes using the provided configuration.
+func InitializeWithConfig(cfg *config.AgentRuntimeConfig) error {
+	return globalRegistry.InitializeWithConfig(cfg)
 }
 
 // Close closes all registered runtimes in the global registry.
@@ -116,7 +123,33 @@ func (r *Registry) List() []RuntimeName {
 // Initialize sets up the default runtimes.
 func (r *Registry) Initialize() {
 	r.Register(RuntimeTmux, NewTmuxRuntime())
-	// SDK runtime will be registered in Phase 3
+	// SDK runtime is initialized via InitializeWithConfig when API key is available
+}
+
+// InitializeWithConfig sets up runtimes using the provided configuration.
+// If SDK config is provided and valid, the SDK runtime is also registered.
+func (r *Registry) InitializeWithConfig(cfg *config.AgentRuntimeConfig) error {
+	// Always register tmux runtime
+	r.Register(RuntimeTmux, NewTmuxRuntime())
+
+	// Register SDK runtime if configured
+	if cfg != nil && cfg.SDK != nil && cfg.SDK.APIKey != "" {
+		sdkRuntime, err := NewSDKRuntime(cfg.SDK)
+		if err != nil {
+			return fmt.Errorf("initializing SDK runtime: %w", err)
+		}
+		r.Register(RuntimeSDK, sdkRuntime)
+	}
+
+	// Set active runtime based on config
+	if cfg != nil && cfg.Type == "sdk" {
+		if err := r.SetActive(RuntimeSDK); err != nil {
+			// Fall back to tmux if SDK not available
+			_ = r.SetActive(RuntimeTmux)
+		}
+	}
+
+	return nil
 }
 
 // CloseAll closes all registered runtimes.
