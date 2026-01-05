@@ -433,3 +433,59 @@ func NewMessagingConfig() *MessagingConfig {
 		NudgeChannels: make(map[string][]string),
 	}
 }
+
+// AgentRuntimeConfig configures the agent runtime layer.
+// This determines whether agents run in tmux sessions (CLI) or via the SDK (headless).
+type AgentRuntimeConfig struct {
+	// Type selects the runtime: "tmux" or "sdk"
+	// Default: "tmux"
+	Type string `json:"type,omitempty"`
+
+	// Tmux contains tmux-specific settings.
+	Tmux *TmuxRuntimeConfig `json:"tmux,omitempty"`
+
+	// SDK contains SDK-specific settings (Phase 3).
+	SDK *SDKRuntimeConfig `json:"sdk,omitempty"`
+}
+
+// TmuxRuntimeConfig contains tmux runtime settings.
+type TmuxRuntimeConfig struct {
+	// Command is the Claude CLI command (default: "claude").
+	Command string `json:"command,omitempty"`
+
+	// Args are additional CLI arguments.
+	Args []string `json:"args,omitempty"`
+
+	// StartupTimeout is how long to wait for Claude to start.
+	// Format: duration string (e.g., "30s", "1m").
+	StartupTimeout string `json:"startup_timeout,omitempty"`
+}
+
+// SDKRuntimeConfig contains SDK runtime settings (Phase 3).
+type SDKRuntimeConfig struct {
+	// APIKey is the Anthropic API key.
+	// Can reference an environment variable with $ENV_VAR syntax.
+	APIKey string `json:"api_key,omitempty"`
+
+	// Model to use (default: "claude-sonnet-4-20250514").
+	Model string `json:"model,omitempty"`
+
+	// MaxTokens per response.
+	MaxTokens int `json:"max_tokens,omitempty"`
+
+	// MaxConcurrentSessions limits parallel SDK sessions.
+	// Default: 10
+	MaxConcurrentSessions int `json:"max_concurrent_sessions,omitempty"`
+}
+
+// DefaultAgentRuntimeConfig returns an AgentRuntimeConfig with sensible defaults.
+func DefaultAgentRuntimeConfig() *AgentRuntimeConfig {
+	return &AgentRuntimeConfig{
+		Type: "tmux",
+		Tmux: &TmuxRuntimeConfig{
+			Command:        "claude",
+			Args:           []string{"--dangerously-skip-permissions"},
+			StartupTimeout: "30s",
+		},
+	}
+}
