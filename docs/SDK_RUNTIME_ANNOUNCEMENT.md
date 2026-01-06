@@ -331,29 +331,28 @@ The session's conversation continues after the tool returns. WebSocket clients s
 
 ### Edge Case 8: SDK Runtime Auth Modes
 
-The SDK runtime operates in two modes depending on whether an API key is available:
+The SDK runtime operates in two modes:
 
-**CLI Mode (default, no API key)**:
+**CLI Mode (default)**:
 ```bash
 gt serve --runtime sdk
-
-# Output:
-SDK runtime: using Claude Code CLI (existing auth)
-Gas Town API server listening on :8080
 ```
 
-In this mode, the server spawns `claude` CLI subprocesses that use your existing OAuth or API key configuration. This is the recommended mode for most users.
+In this mode, the server spawns `claude` CLI subprocesses that use your existing OAuth or API key configuration. This is the default and recommended mode—it respects your Claude Code authentication settings.
 
-**Direct API Mode (explicit API key)**:
+**Direct API Mode (explicit API key in request)**:
+
+To bypass Claude Code and use direct API calls, pass an `api_key` field in the session creation request:
+
 ```bash
-ANTHROPIC_API_KEY=sk-ant-... gt serve --runtime sdk
-
-# Output:
-SDK runtime: using direct Anthropic API
-Gas Town API server listening on :8080
+curl -X POST http://localhost:8080/sessions \
+  -H "Content-Type: application/json" \
+  -d '{"agent_id": "test", "role": "polecat", "api_key": "sk-ant-..."}'
 ```
 
-In this mode, the server calls the Anthropic API directly, bypassing Claude Code. This is useful for isolated deployments or when you need precise control over API calls.
+This is useful for isolated deployments or when you need precise control over API calls.
+
+**Important**: The SDK runtime does NOT read `ANTHROPIC_API_KEY` from the environment. This is intentional—it prevents accidentally overriding your OAuth authentication (e.g., Claude Max subscription) when you happen to have API keys in your environment.
 
 ---
 
@@ -500,14 +499,11 @@ The Gas Town SDK Integration transforms what was a terminal-bound orchestration 
 Start experimenting:
 
 ```bash
-# Headless API server (uses your existing Claude Code auth)
+# Headless API server (uses your existing Claude Code OAuth/auth)
 gt serve --runtime sdk
 
 # Or with terminal support
 gt serve --runtime tmux
-
-# Or with explicit API key for direct API calls
-ANTHROPIC_API_KEY=sk-ant-... gt serve --runtime sdk
 ```
 
 Then hit `http://localhost:8080/health` and start building.

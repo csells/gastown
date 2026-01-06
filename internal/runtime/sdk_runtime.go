@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
 	"sync"
 	"time"
@@ -68,9 +67,12 @@ type sdkSession struct {
 }
 
 // NewSDKRuntime creates a new SDK-based runtime.
-// If an API key is provided (via config or ANTHROPIC_API_KEY env var), it uses
-// direct Anthropic API calls. Otherwise, it spawns Claude Code CLI subprocesses
-// which use the user's existing OAuth/auth configuration.
+// By default, it spawns Claude Code CLI subprocesses which use the user's
+// existing OAuth/auth configuration. If an API key is explicitly provided
+// in the config, it uses direct Anthropic API calls instead.
+//
+// Note: This does NOT read ANTHROPIC_API_KEY from the environment to avoid
+// overriding the user's preferred auth method (e.g., OAuth via Claude Max).
 func NewSDKRuntime(cfg *config.SDKRuntimeConfig) (*SDKRuntime, error) {
 	if cfg == nil {
 		cfg = &config.SDKRuntimeConfig{}
@@ -87,19 +89,14 @@ func NewSDKRuntime(cfg *config.SDKRuntimeConfig) (*SDKRuntime, error) {
 		tools:     make(map[string]ToolConfig),
 	}
 
-	// Check for API key - if present, use direct API mode
-	apiKey := cfg.APIKey
-	if apiKey == "" {
-		apiKey = os.Getenv("ANTHROPIC_API_KEY")
-	}
-
-	if apiKey != "" {
-		// Direct API mode
-		client := anthropic.NewClient(option.WithAPIKey(apiKey))
+	// Only use direct API mode if API key is EXPLICITLY provided in config
+	// Do NOT check environment variables - that would override OAuth auth
+	if cfg.APIKey != "" {
+		client := anthropic.NewClient(option.WithAPIKey(cfg.APIKey))
 		runtime.client = &client
 		runtime.useCLI = false
 	} else {
-		// CLI mode - spawn claude subprocess (uses user's existing auth)
+		// CLI mode - spawn claude subprocess (uses user's existing OAuth/auth)
 		runtime.useCLI = true
 	}
 
