@@ -8,7 +8,7 @@
 
 Gas Town has always been about orchestrating teams of AI agents—polecats working on issues, witnesses monitoring health, refineries handling merge queues. Until now, this orchestration was deeply tied to tmux terminals: agents lived in tmux sessions, operators attached to terminals to observe progress, and the entire system required a terminal multiplexer to function.
 
-Today we're announcing the **Gas Town SDK Integration**, a new abstraction layer that decouples agent management from any specific runtime. This opens the door to headless operation via the Claude API, programmatic access via REST/WebSocket, and entirely new deployment models for autonomous agent teams.
+Today we're announcing the **Gas Town SDK Integration**, a new abstraction layer that decouples agent management from any specific runtime. This opens the door to headless operation, programmatic access via REST/WebSocket, and entirely new deployment models for autonomous agent teams—all while respecting your existing Claude Code authentication.
 
 ---
 
@@ -45,7 +45,7 @@ Every operation that Gas Town performs on agents—spawning a polecat, nudging a
 
 **TmuxRuntime** preserves all existing Gas Town behavior. It wraps the tmux package, maintains session state, applies visual themes based on rig assignment, and supports the full range of terminal-based operations like attaching for interactive debugging.
 
-**SDKRuntime** is the new kid on the block. It creates agent sessions backed by the Claude API directly—no terminal, no tmux, pure API calls. Sessions maintain conversation history, support tool execution, and stream responses through Go channels.
+**SDKRuntime** is the new addition. By default, it spawns Claude Code CLI subprocesses that use your existing OAuth or API key authentication—the same auth you use when running `claude` directly. No separate API key configuration required.
 
 The key insight: the same high-level operations (`Start`, `SendPrompt`, `Stop`) work identically regardless of which runtime you're using. A polecat spawned via SDK behaves the same as one in tmux—it just doesn't have a visual terminal to attach to.
 
@@ -62,9 +62,11 @@ The key insight: the same high-level operations (`Start`, `SendPrompt`, `Stop`) 
 **The New Way**:
 
 ```bash
-# Start the API server with SDK runtime (headless)
-ANTHROPIC_API_KEY=sk-ant-... gt serve --runtime sdk --addr :8080
+# Start the API server with SDK runtime (uses existing Claude Code auth)
+gt serve --runtime sdk --addr :8080
 ```
+
+That's it. No API key configuration needed—the SDK runtime spawns `claude` CLI subprocesses that use Maya's existing OAuth authentication.
 
 Maya's platform can now:
 
@@ -120,11 +122,10 @@ Maya never sees a terminal. Her platform has full programmatic control.
 gt serve --runtime tmux --addr :8080
 
 # Headless runtime for platform integrations
-# Uses existing Claude Code OAuth auth - no API key needed!
 gt serve --runtime sdk --addr :8081
 ```
 
-Both expose the same REST API. Teams choose their endpoint based on their needs. The SDK server handles automated workflows; the tmux server supports interactive debugging sessions.
+Both expose the same REST API. Both use the existing Claude Code authentication. Teams choose their endpoint based on their needs. The SDK server handles automated workflows; the tmux server supports interactive debugging sessions.
 
 When a polecat gets stuck in the SDK runtime, Carlos can check its conversation history:
 
@@ -176,7 +177,7 @@ await fetch(`${API_BASE}/sessions/${session.session_id}/prompt`, {
 });
 ```
 
-Priya gets streaming responses in her terminal without any tmux overhead. When she's happy with the behavior, she deploys to production knowing it'll work identically.
+Priya gets streaming responses in her terminal without any tmux overhead. The SDK runtime uses her existing Claude Code OAuth session—the same one she uses for interactive development.
 
 ---
 
@@ -214,7 +215,7 @@ jobs:
           curl http://localhost:8080/sessions/$SESSION/output | jq -r '.output'
 ```
 
-No display server, no tmux—just pure API calls in a CI container.
+No display server, no tmux—just pure API calls in a CI container. The Claude Code CLI handles authentication via whatever method is configured in the CI environment.
 
 ---
 
@@ -228,7 +229,7 @@ No display server, no tmux—just pure API calls in a CI container.
 curl -X POST http://localhost:8080/sessions \
   -d '{"agent_id":"test","role":"polecat","rig_name":"myrig","worker_name":"toast"}'
 
-# Response (409 Conflict):
+# Response (500 Internal Server Error):
 {"error": "session already exists: gt-myrig-toast"}
 ```
 
@@ -238,7 +239,7 @@ curl -X POST http://localhost:8080/sessions \
 
 ---
 
-### Edge Case 2: Max Concurrent Sessions Reached (SDK Only)
+### Edge Case 2: Max Concurrent Sessions Reached
 
 **What happens**: The SDK runtime has a configurable concurrency limit (default: 10). When exceeded:
 
@@ -247,7 +248,7 @@ curl -X POST http://localhost:8080/sessions \
 {"error": "max concurrent sessions reached (10)"}
 ```
 
-**Why it matters**: Each SDK session consumes API tokens and maintains conversation state. The semaphore prevents runaway costs and memory usage.
+**Why it matters**: Each SDK session spawns a Claude Code subprocess and maintains conversation state. The semaphore prevents resource exhaustion.
 
 **What to do**: Either increase `MaxConcurrentSessions` in the SDK config, wait for existing sessions to complete, or stop idle sessions.
 
@@ -260,7 +261,7 @@ curl -X POST http://localhost:8080/sessions \
 ```bash
 curl http://localhost:8080/sessions/gt-noexist-fake
 
-# Response (but check the actual status):
+# Response:
 {
   "session": {"session_id": "gt-noexist-fake", "running": false},
   "health": "unknown"
@@ -301,62 +302,32 @@ curl -X POST http://localhost:8080/sessions/gt-myrig-toast/prompt \
 
 **What happens**: `DELETE /sessions/{id}` supports a `?force=true` parameter.
 
-- **Without force**: The runtime attempts graceful shutdown. For tmux, it sends Ctrl-C and waits briefly. For SDK, it cancels the context and lets the run loop exit cleanly.
+- **Without force**: The runtime attempts graceful shutdown. For tmux, it sends Ctrl-C and waits briefly. For SDK, it closes stdin and lets the Claude process exit cleanly.
 
-- **With force**: Immediate termination. Tmux sessions are killed instantly; SDK sessions have their context cancelled without waiting.
+- **With force**: Immediate termination. Tmux sessions are killed instantly; SDK sessions have their process killed without waiting.
 
 **When to use force**: When a session is truly stuck and graceful shutdown hangs.
 
 ---
 
-### Edge Case 7: Long-Running Tool Execution (SDK)
+### Edge Case 7: Claude Code Not Installed
 
-**What happens**: The SDK runtime supports tool registration. If Claude calls a tool that takes a long time, the session blocks waiting for the tool result.
+**What happens**: You start with `--runtime sdk` but `claude` CLI isn't in PATH:
 
-```go
-runtime.RegisterTool(runtime.ToolConfig{
-    Name: "slow_operation",
-    Handler: func(ctx context.Context, input map[string]any) (any, error) {
-        time.Sleep(5 * time.Minute) // Very slow
-        return "done", nil
-    },
-})
+The server starts, but session creation fails:
+
+```bash
+curl -X POST http://localhost:8080/sessions -d '{"agent_id":"test","role":"polecat"}'
+
+# Response (500 Internal Server Error):
+{"error": "failed to start claude: exec: \"claude\": executable file not found in $PATH"}
 ```
 
-The session's conversation continues after the tool returns. WebSocket clients see `tool_call` and `tool_result` messages.
-
-**What to do**: Tools should respect the context cancellation. If the session is stopped, the context is cancelled, and well-behaved tools should exit promptly.
+**What to do**: Install Claude Code CLI, or ensure it's in your PATH.
 
 ---
 
-### Edge Case 8: SDK Runtime Auth Modes
-
-The SDK runtime operates in two modes:
-
-**CLI Mode (default)**:
-```bash
-gt serve --runtime sdk
-```
-
-In this mode, the server spawns `claude` CLI subprocesses that use your existing OAuth or API key configuration. This is the default and recommended mode—it respects your Claude Code authentication settings.
-
-**Direct API Mode (explicit API key in request)**:
-
-To bypass Claude Code and use direct API calls, pass an `api_key` field in the session creation request:
-
-```bash
-curl -X POST http://localhost:8080/sessions \
-  -H "Content-Type: application/json" \
-  -d '{"agent_id": "test", "role": "polecat", "api_key": "sk-ant-..."}'
-```
-
-This is useful for isolated deployments or when you need precise control over API calls.
-
-**Important**: The SDK runtime does NOT read `ANTHROPIC_API_KEY` from the environment. This is intentional—it prevents accidentally overriding your OAuth authentication (e.g., Claude Max subscription) when you happen to have API keys in your environment.
-
----
-
-### Edge Case 9: Tmux Not Available
+### Edge Case 8: Tmux Not Available
 
 **What happens**: You start with `--runtime tmux` but tmux isn't installed:
 
@@ -373,6 +344,17 @@ curl -X POST http://localhost:8080/sessions -d '{"agent_id":"test","role":"polec
 
 ---
 
+### Edge Case 9: Authentication
+
+**How auth works**: The SDK runtime spawns `claude` CLI subprocesses. These subprocesses use whatever authentication you've configured for Claude Code:
+
+- **OAuth (Claude Max)**: If you've authenticated via `claude login`, the subprocess uses your OAuth session.
+- **API Key**: If you've set `ANTHROPIC_API_KEY` in Claude Code's config, the subprocess uses that.
+
+The Gas Town API server itself does **not** read `ANTHROPIC_API_KEY` from the environment. This is intentional—it prevents accidentally overriding your OAuth authentication when you happen to have API keys in your environment (common for Anthropic employees and developers testing multiple auth methods).
+
+---
+
 ## Feature Deep Dive: WebSocket Streaming
 
 The WebSocket endpoint at `/sessions/{id}/ws` is the heart of real-time interaction.
@@ -384,12 +366,12 @@ The WebSocket endpoint at `/sessions/{id}/ws` is the heart of real-time interact
    {"type": "text", "content": "Here's the code you requested...", "timestamp": "2024-01-15T10:30:00Z"}
    ```
 
-2. **tool_call**: Agent is invoking a tool (SDK only)
+2. **tool_call**: Agent is invoking a tool
    ```json
    {"type": "tool_call", "content": "", "timestamp": "..."}
    ```
 
-3. **tool_result**: Tool execution completed (SDK only)
+3. **tool_result**: Tool execution completed
    ```json
    {"type": "tool_result", "content": "", "timestamp": "..."}
    ```
@@ -432,7 +414,7 @@ Each runtime advertises its capabilities:
 // TmuxRuntime capabilities
 {
     SupportsStreaming:    false,  // Polling-based (500ms intervals)
-    SupportsToolCalls:    false,  // Claude Code handles tools
+    SupportsToolCalls:    false,  // Claude Code handles tools internally
     SupportsSystemPrompt: false,  // Uses CLAUDE.md files
     SupportsAttach:       true,   // Can attach terminal
     SupportsCapture:      true,   // Can capture pane output
@@ -442,7 +424,7 @@ Each runtime advertises its capabilities:
 // SDKRuntime capabilities
 {
     SupportsStreaming:    true,   // Real streaming via channels
-    SupportsToolCalls:    true,   // Native tool support
+    SupportsToolCalls:    true,   // Tool calls visible in stream
     SupportsSystemPrompt: true,   // Direct system prompt
     SupportsAttach:       false,  // No terminal
     SupportsCapture:      true,   // Conversation history
@@ -496,10 +478,12 @@ This data powers the Gas Town Deacon's health checks—agents that go too long w
 
 The Gas Town SDK Integration transforms what was a terminal-bound orchestration system into a flexible, API-driven platform. Whether you're building internal tooling, integrating with CI/CD, or simply want faster local development, the same robust agent management is now available via REST and WebSocket.
 
+The SDK runtime respects your existing Claude Code authentication—OAuth, API key, whatever you've configured. No separate credentials to manage.
+
 Start experimenting:
 
 ```bash
-# Headless API server (uses your existing Claude Code OAuth/auth)
+# Headless API server (uses your existing Claude Code auth)
 gt serve --runtime sdk
 
 # Or with terminal support
