@@ -92,13 +92,9 @@ Maya's platform can now:
    };
    ```
 
-3. **Send work** via the WebSocket connection (or POST):
+3. **Send work** via the WebSocket connection:
    ```javascript
-   // Send prompt through WebSocket
    ws.send(JSON.stringify({ prompt: "Please investigate ticket #4521: User can't log in" }));
-
-   // Or via REST (but WebSocket must be connected first to receive responses)
-   // POST /sessions/{id}/prompt with {"prompt": "..."}
    ```
 
 4. **Monitor status** via `GET /sessions/{id}`:
@@ -282,13 +278,13 @@ The correct order is critical:
 
 1. **Create session** via `POST /sessions`
 2. **Connect WebSocket** at `/sessions/{id}/ws`
-3. **Send prompts** via WebSocket or REST
+3. **Send prompts** via WebSocket
 
-**Connecting too early**: If you connect to the WebSocket before the session exists, the connection upgrades successfully but no messages arrive. Prompts sent via the WebSocket fail silently.
+**Connecting too early**: If you connect to the WebSocket before the session exists, the connection upgrades successfully but no messages arrive.
 
-**Sending prompts before WebSocket connects**: If you send a prompt via `POST /sessions/{id}/prompt` before the WebSocket is connected, responses are generated but have nowhere to go—they're dropped.
+**Sending before connected**: If you send a prompt before the WebSocket `open` event fires, it may be dropped.
 
-**Best practice**: Use the WebSocket for sending prompts too. Wait for the `open` event before sending:
+Wait for the `open` event before sending:
 
 ```javascript
 const session = await createSession();
@@ -522,6 +518,5 @@ Then hit `http://localhost:8080/health` and start building.
 | `/sessions` | GET | List all sessions |
 | `/sessions/{id}` | GET | Get session status |
 | `/sessions/{id}` | DELETE | Stop session |
-| `/sessions/{id}/prompt` | POST | Send prompt |
 | `/sessions/{id}/output` | GET | Capture output |
-| `/sessions/{id}/ws` | GET | WebSocket streaming |
+| `/sessions/{id}/ws` | WebSocket | Streaming responses + send prompts |

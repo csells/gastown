@@ -45,7 +45,6 @@ func (s *Server) Start() error {
 	mux.HandleFunc("DELETE /sessions/{id}", s.handleDeleteSession)
 	mux.HandleFunc("GET /sessions/{id}", s.handleGetSession)
 	mux.HandleFunc("GET /sessions", s.handleListSessions)
-	mux.HandleFunc("POST /sessions/{id}/prompt", s.handleSendPrompt)
 	mux.HandleFunc("GET /sessions/{id}/output", s.handleCaptureOutput)
 
 	// WebSocket for streaming
@@ -219,28 +218,6 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
-}
-
-func (s *Server) handleSendPrompt(w http.ResponseWriter, r *http.Request) {
-	sessionID := r.PathValue("id")
-	if sessionID == "" {
-		s.writeError(w, http.StatusBadRequest, "session id required")
-		return
-	}
-
-	var req PromptRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.writeError(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-
-	if err := s.runtime.SendPrompt(r.Context(), sessionID, req.Prompt); err != nil {
-		s.writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	w.WriteHeader(http.StatusAccepted)
-	json.NewEncoder(w).Encode(map[string]string{"status": "prompt sent"})
 }
 
 func (s *Server) handleCaptureOutput(w http.ResponseWriter, r *http.Request) {
