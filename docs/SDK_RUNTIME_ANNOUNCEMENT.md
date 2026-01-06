@@ -81,12 +81,7 @@ Maya's platform can now:
    }
    ```
 
-2. **Send work** via `POST /sessions/{id}/prompt`:
-   ```json
-   {"prompt": "Please investigate ticket #4521: User can't log in"}
-   ```
-
-3. **Stream responses** via WebSocket at `/sessions/{id}/ws`:
+2. **Connect WebSocket** at `/sessions/{id}/ws` to receive streaming responses:
    ```javascript
    const ws = new WebSocket('ws://localhost:8080/sessions/gt-support-handler-1/ws');
    ws.onmessage = (event) => {
@@ -95,6 +90,15 @@ Maya's platform can now:
        updateUI(msg.content);
      }
    };
+   ```
+
+3. **Send work** via the WebSocket connection (or POST):
+   ```javascript
+   // Send prompt through WebSocket
+   ws.send(JSON.stringify({ prompt: "Please investigate ticket #4521: User can't log in" }));
+
+   // Or via REST (but WebSocket must be connected first to receive responses)
+   // POST /sessions/{id}/prompt with {"prompt": "..."}
    ```
 
 4. **Monitor status** via `GET /sessions/{id}`:
@@ -108,6 +112,8 @@ Maya's platform can now:
    ```
 
 Maya never sees a terminal. Her platform has full programmatic control.
+
+**Important**: Always connect the WebSocket *before* sending prompts. Otherwise, responses generated before the WebSocket connects are lost.
 
 ---
 
@@ -149,7 +155,7 @@ import WebSocket from "ws";
 
 const API_BASE = "http://localhost:8080";
 
-// Create a session
+// 1. Create a session
 const session = await fetch(`${API_BASE}/sessions`, {
   method: "POST",
   headers: { "Content-Type": "application/json" },
@@ -160,7 +166,7 @@ const session = await fetch(`${API_BASE}/sessions`, {
   })
 }).then(r => r.json());
 
-// Connect WebSocket for streaming
+// 2. Connect WebSocket BEFORE sending any prompts
 const ws = new WebSocket(`ws://localhost:8080/sessions/${session.session_id}/ws`);
 
 ws.on("message", (data) => {
@@ -169,11 +175,9 @@ ws.on("message", (data) => {
   if (msg.type === "complete") console.log("\n--- Done ---");
 });
 
-// Send a prompt
-await fetch(`${API_BASE}/sessions/${session.session_id}/prompt`, {
-  method: "POST",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({ prompt: "Write hello world in Ada" })
+// 3. Wait for connection, then send prompt via WebSocket
+ws.on("open", () => {
+  ws.send(JSON.stringify({ prompt: "Write hello world in Ada" }));
 });
 ```
 
@@ -272,13 +276,28 @@ curl http://localhost:8080/sessions/gt-noexist-fake
 
 ---
 
-### Edge Case 4: WebSocket Connection Before Session Exists
+### Edge Case 4: WebSocket Timing
 
-**What happens**: You connect to the WebSocket endpoint for a session that hasn't been created yet.
+The correct order is critical:
 
-The connection upgrades successfully (WebSocket handshake completes), but no messages arrive. When you send prompts via the WebSocket, they fail silently because there's no session to route them to.
+1. **Create session** via `POST /sessions`
+2. **Connect WebSocket** at `/sessions/{id}/ws`
+3. **Send prompts** via WebSocket or REST
 
-**What to do**: Always create the session via `POST /sessions` first, then connect the WebSocket. The session creation response gives you the `session_id` to use in the WebSocket URL.
+**Connecting too early**: If you connect to the WebSocket before the session exists, the connection upgrades successfully but no messages arrive. Prompts sent via the WebSocket fail silently.
+
+**Sending prompts before WebSocket connects**: If you send a prompt via `POST /sessions/{id}/prompt` before the WebSocket is connected, responses are generated but have nowhere to go—they're dropped.
+
+**Best practice**: Use the WebSocket for sending prompts too. Wait for the `open` event before sending:
+
+```javascript
+const session = await createSession();
+const ws = new WebSocket(`ws://localhost:8080/sessions/${session.session_id}/ws`);
+
+ws.on("open", () => {
+  ws.send(JSON.stringify({ prompt: "Start working on the task" }));
+});
+```
 
 ---
 

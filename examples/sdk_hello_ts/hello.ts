@@ -47,19 +47,6 @@ async function createSession(): Promise<SessionResponse> {
   return response.json();
 }
 
-async function sendPrompt(sessionId: string, prompt: string): Promise<void> {
-  const response = await fetch(`${API_BASE}/sessions/${sessionId}/prompt`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ prompt }),
-  });
-
-  if (!response.ok) {
-    const error = await response.json();
-    throw new Error(`Failed to send prompt: ${error.error}`);
-  }
-}
-
 async function deleteSession(sessionId: string): Promise<void> {
   const response = await fetch(`${API_BASE}/sessions/${sessionId}`, {
     method: "DELETE",
@@ -93,16 +80,16 @@ async function main() {
   console.log("===========================\n");
   console.log(`Connecting to: ${API_BASE}\n`);
 
-  // Create a session
-  console.log("Creating session...");
+  // 1. Create a session
+  console.log("1. Creating session...");
   const session = await createSession();
-  console.log(`Session created: ${session.session_id}`);
-  console.log(`Runtime: ${session.runtime_type}\n`);
+  console.log(`   Session created: ${session.session_id}`);
+  console.log(`   Runtime: ${session.runtime_type}\n`);
 
-  // Connect WebSocket for streaming responses
-  console.log("Connecting WebSocket...");
+  // 2. Connect WebSocket BEFORE sending any prompts
+  console.log("2. Connecting WebSocket...");
   const ws = await connectWebSocket(session.session_id);
-  console.log("WebSocket connected\n");
+  console.log("   WebSocket connected\n");
 
   // Set up message handler
   const responsePromise = new Promise<void>((resolve, reject) => {
@@ -128,13 +115,14 @@ async function main() {
     ws.on("close", () => resolve());
   });
 
-  // Send prompt
+  // 3. Send prompt via WebSocket (not REST - avoids race condition)
   const prompt = "Write a Hello World program in Ada. Just the code, no explanation.";
-  console.log(`Prompt: ${prompt}\n`);
+  console.log(`3. Sending prompt via WebSocket`);
+  console.log(`   Prompt: ${prompt}\n`);
   console.log("Response:");
   console.log("─────────");
 
-  await sendPrompt(session.session_id, prompt);
+  ws.send(JSON.stringify({ prompt }));
 
   // Wait for response to complete
   await responsePromise;
