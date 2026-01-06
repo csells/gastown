@@ -1,10 +1,13 @@
 package runtime
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"sync"
 	"time"
 
@@ -13,12 +16,16 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 )
 
-// SDKRuntime implements AgentRuntime using the Claude Agent SDK.
+// SDKRuntime implements AgentRuntime using either:
+// 1. Direct Anthropic API calls (when API key is provided)
+// 2. Claude Code CLI subprocess (when no API key - uses user's existing OAuth/auth)
+//
 // This enables headless operation without terminal dependencies.
 type SDKRuntime struct {
 	config   *config.SDKRuntimeConfig
-	client   anthropic.Client // Value type, not pointer
-	sessions sync.Map         // sessionID -> *sdkSession
+	client   *anthropic.Client // nil when using CLI mode
+	useCLI   bool              // true when spawning claude CLI subprocess
+	sessions sync.Map          // sessionID -> *sdkSession
 
 	// Concurrency control
 	semaphore chan struct{}
@@ -32,9 +39,14 @@ type SDKRuntime struct {
 type sdkSession struct {
 	AgentSession
 
-	// SDK state
+	// SDK state (API mode)
 	conversation []anthropic.MessageParam
 	systemPrompt string
+
+	// CLI mode state
+	cmd    *exec.Cmd
+	stdin  io.WriteCloser
+	stdout io.ReadCloser
 
 	// Control
 	ctx    context.Context
@@ -56,32 +68,42 @@ type sdkSession struct {
 }
 
 // NewSDKRuntime creates a new SDK-based runtime.
+// If an API key is provided (via config or ANTHROPIC_API_KEY env var), it uses
+// direct Anthropic API calls. Otherwise, it spawns Claude Code CLI subprocesses
+// which use the user's existing OAuth/auth configuration.
 func NewSDKRuntime(cfg *config.SDKRuntimeConfig) (*SDKRuntime, error) {
 	if cfg == nil {
 		cfg = &config.SDKRuntimeConfig{}
 	}
-
-	apiKey := cfg.APIKey
-	if apiKey == "" {
-		apiKey = os.Getenv("ANTHROPIC_API_KEY")
-	}
-	if apiKey == "" {
-		return nil, fmt.Errorf("API key required: set api_key in config or ANTHROPIC_API_KEY env var")
-	}
-
-	client := anthropic.NewClient(option.WithAPIKey(apiKey))
 
 	maxConcurrent := cfg.MaxConcurrentSessions
 	if maxConcurrent <= 0 {
 		maxConcurrent = 10
 	}
 
-	return &SDKRuntime{
+	runtime := &SDKRuntime{
 		config:    cfg,
-		client:    client,
 		semaphore: make(chan struct{}, maxConcurrent),
 		tools:     make(map[string]ToolConfig),
-	}, nil
+	}
+
+	// Check for API key - if present, use direct API mode
+	apiKey := cfg.APIKey
+	if apiKey == "" {
+		apiKey = os.Getenv("ANTHROPIC_API_KEY")
+	}
+
+	if apiKey != "" {
+		// Direct API mode
+		client := anthropic.NewClient(option.WithAPIKey(apiKey))
+		runtime.client = &client
+		runtime.useCLI = false
+	} else {
+		// CLI mode - spawn claude subprocess (uses user's existing auth)
+		runtime.useCLI = true
+	}
+
+	return runtime, nil
 }
 
 // Start implements AgentRuntime.Start
@@ -132,7 +154,11 @@ func (r *SDKRuntime) Start(ctx context.Context, opts StartOptions) (*AgentSessio
 	r.sessions.Store(sessionID, session)
 
 	// Start the session loop in background
-	go session.run()
+	if r.useCLI {
+		go session.runCLI()
+	} else {
+		go session.run()
+	}
 
 	// Send initial prompt if provided
 	if opts.InitialPrompt != "" {
@@ -172,7 +198,7 @@ func (r *SDKRuntime) buildSystemPrompt(opts StartOptions) string {
 	return prompt
 }
 
-// run is the main loop for an SDK session.
+// run is the main loop for an SDK session (API mode).
 func (s *sdkSession) run() {
 	defer func() {
 		close(s.responseCh)
@@ -194,7 +220,152 @@ func (s *sdkSession) run() {
 	}
 }
 
-// handlePrompt processes a prompt and generates a response.
+// runCLI is the main loop for a CLI-mode session.
+// It spawns `claude` as a subprocess and communicates via stdin/stdout.
+func (s *sdkSession) runCLI() {
+	defer func() {
+		close(s.responseCh)
+		s.mu.Lock()
+		s.Running = false
+		s.mu.Unlock()
+	}()
+
+	// Start claude CLI with print mode for non-interactive output
+	// Using --output-format stream-json for streaming JSON responses
+	args := []string{"--output-format", "stream-json", "--verbose"}
+
+	// Add system prompt if provided
+	if s.systemPrompt != "" {
+		args = append(args, "--system-prompt", s.systemPrompt)
+	}
+
+	s.cmd = exec.CommandContext(s.ctx, "claude", args...)
+
+	var err error
+	s.stdin, err = s.cmd.StdinPipe()
+	if err != nil {
+		s.responseCh <- Response{
+			Type:      ResponseError,
+			Error:     fmt.Errorf("failed to get stdin pipe: %w", err),
+			Timestamp: time.Now(),
+		}
+		return
+	}
+
+	s.stdout, err = s.cmd.StdoutPipe()
+	if err != nil {
+		s.responseCh <- Response{
+			Type:      ResponseError,
+			Error:     fmt.Errorf("failed to get stdout pipe: %w", err),
+			Timestamp: time.Now(),
+		}
+		return
+	}
+
+	if err := s.cmd.Start(); err != nil {
+		s.responseCh <- Response{
+			Type:      ResponseError,
+			Error:     fmt.Errorf("failed to start claude: %w", err),
+			Timestamp: time.Now(),
+		}
+		return
+	}
+
+	// Read stdout in background
+	go s.readCLIOutput()
+
+	// Process prompts
+	for {
+		select {
+		case <-s.ctx.Done():
+			s.stdin.Close()
+			s.cmd.Wait()
+			return
+		case prompt, ok := <-s.promptCh:
+			if !ok {
+				s.stdin.Close()
+				s.cmd.Wait()
+				return
+			}
+			s.handleCLIPrompt(prompt)
+		}
+	}
+}
+
+// readCLIOutput reads streaming JSON output from claude CLI.
+func (s *sdkSession) readCLIOutput() {
+	scanner := bufio.NewScanner(s.stdout)
+	// Increase buffer size for potentially large responses
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 1024*1024)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+
+		// Parse streaming JSON response
+		var msg struct {
+			Type    string `json:"type"`
+			Content string `json:"content"`
+			Error   string `json:"error,omitempty"`
+		}
+
+		if err := json.Unmarshal([]byte(line), &msg); err != nil {
+			// Not JSON, treat as raw text
+			s.responseCh <- Response{
+				Type:      ResponseText,
+				Content:   line,
+				Timestamp: time.Now(),
+			}
+			continue
+		}
+
+		switch msg.Type {
+		case "text", "content":
+			s.responseCh <- Response{
+				Type:      ResponseText,
+				Content:   msg.Content,
+				Timestamp: time.Now(),
+			}
+		case "error":
+			s.responseCh <- Response{
+				Type:      ResponseError,
+				Error:     fmt.Errorf("%s", msg.Error),
+				Timestamp: time.Now(),
+			}
+		case "done", "complete", "result":
+			s.mu.Lock()
+			s.lastResp = time.Now()
+			s.mu.Unlock()
+			s.responseCh <- Response{
+				Type:      ResponseComplete,
+				Timestamp: time.Now(),
+			}
+		}
+	}
+}
+
+// handleCLIPrompt sends a prompt to the claude CLI subprocess.
+func (s *sdkSession) handleCLIPrompt(prompt string) {
+	s.mu.Lock()
+	s.lastPrompt = time.Now()
+	s.turnCount++
+	s.mu.Unlock()
+
+	// Send prompt as a line to stdin
+	_, err := fmt.Fprintf(s.stdin, "%s\n", prompt)
+	if err != nil {
+		s.responseCh <- Response{
+			Type:      ResponseError,
+			Error:     fmt.Errorf("failed to send prompt: %w", err),
+			Timestamp: time.Now(),
+		}
+	}
+}
+
+// handlePrompt processes a prompt and generates a response (API mode).
 func (s *sdkSession) handlePrompt(prompt string) {
 	s.mu.Lock()
 	s.lastPrompt = time.Now()
@@ -244,7 +415,7 @@ func (s *sdkSession) handlePrompt(prompt string) {
 	}
 
 	// Call the API
-	response, err := s.runtime.client.Messages.New(s.ctx, params)
+	response, err := (*s.runtime.client).Messages.New(s.ctx, params)
 	if err != nil {
 		s.responseCh <- Response{
 			Type:      ResponseError,
@@ -398,7 +569,7 @@ func (s *sdkSession) handleToolResults() {
 		params.Tools = tools
 	}
 
-	response, err := s.runtime.client.Messages.New(s.ctx, params)
+	response, err := (*s.runtime.client).Messages.New(s.ctx, params)
 	if err != nil {
 		s.responseCh <- Response{
 			Type:      ResponseError,
@@ -525,8 +696,22 @@ func (r *SDKRuntime) Stop(ctx context.Context, sessionID string, force bool) err
 	}
 
 	session := stored.(*sdkSession)
+
+	// For CLI mode, close stdin to signal the subprocess to exit
+	if session.stdin != nil {
+		session.stdin.Close()
+	}
+
 	session.cancel() // Cancel the context to stop the run loop
 	close(session.promptCh)
+
+	// For CLI mode, wait for the process to exit
+	if session.cmd != nil {
+		if force {
+			session.cmd.Process.Kill()
+		}
+		session.cmd.Wait()
+	}
 
 	r.sessions.Delete(sessionID)
 	<-r.semaphore // Release semaphore slot

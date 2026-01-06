@@ -8,7 +8,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 )
 
-func TestNewSDKRuntime_RequiresAPIKey(t *testing.T) {
+func TestNewSDKRuntime_CLIModeWithoutAPIKey(t *testing.T) {
 	// Ensure ANTHROPIC_API_KEY is not set for this test
 	original := os.Getenv("ANTHROPIC_API_KEY")
 	os.Unsetenv("ANTHROPIC_API_KEY")
@@ -18,16 +18,24 @@ func TestNewSDKRuntime_RequiresAPIKey(t *testing.T) {
 		}
 	}()
 
-	_, err := NewSDKRuntime(&config.SDKRuntimeConfig{})
-	if err == nil {
-		t.Error("NewSDKRuntime() expected error when no API key")
+	// Without API key, SDK runtime should use CLI mode (spawn claude subprocess)
+	rt, err := NewSDKRuntime(&config.SDKRuntimeConfig{})
+	if err != nil {
+		t.Errorf("NewSDKRuntime() error = %v, expected nil (CLI mode)", err)
+	}
+	if rt == nil {
+		t.Fatal("NewSDKRuntime() returned nil")
+	}
+	if !rt.useCLI {
+		t.Error("Expected useCLI = true when no API key provided")
+	}
+	if rt.client != nil {
+		t.Error("Expected client = nil in CLI mode")
 	}
 }
 
-func TestNewSDKRuntime_WithAPIKey(t *testing.T) {
-	// Skip if we don't want to test with real credentials
-	t.Skip("Requires API key - skipping by default")
-
+func TestNewSDKRuntime_APIModeWithAPIKey(t *testing.T) {
+	// With API key, SDK runtime should use direct API mode
 	rt, err := NewSDKRuntime(&config.SDKRuntimeConfig{
 		APIKey: "test-key",
 	})
@@ -36,6 +44,12 @@ func TestNewSDKRuntime_WithAPIKey(t *testing.T) {
 	}
 	if rt == nil {
 		t.Fatal("NewSDKRuntime() returned nil")
+	}
+	if rt.useCLI {
+		t.Error("Expected useCLI = false when API key provided")
+	}
+	if rt.client == nil {
+		t.Error("Expected client != nil in API mode")
 	}
 }
 

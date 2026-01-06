@@ -120,7 +120,8 @@ Maya never sees a terminal. Her platform has full programmatic control.
 gt serve --runtime tmux --addr :8080
 
 # Headless runtime for platform integrations
-ANTHROPIC_API_KEY=sk-ant-... gt serve --runtime sdk --addr :8081
+# Uses existing Claude Code OAuth auth - no API key needed!
+gt serve --runtime sdk --addr :8081
 ```
 
 Both expose the same REST API. Teams choose their endpoint based on their needs. The SDK server handles automated workflows; the tmux server supports interactive debugging sessions.
@@ -328,18 +329,31 @@ The session's conversation continues after the tool returns. WebSocket clients s
 
 ---
 
-### Edge Case 8: API Key Not Set for SDK Runtime
+### Edge Case 8: SDK Runtime Auth Modes
 
-**What happens**: You start the server with `--runtime sdk` but no API key:
+The SDK runtime operates in two modes depending on whether an API key is available:
 
+**CLI Mode (default, no API key)**:
 ```bash
 gt serve --runtime sdk
 
 # Output:
-ANTHROPIC_API_KEY environment variable required for SDK runtime
+SDK runtime: using Claude Code CLI (existing auth)
+Gas Town API server listening on :8080
 ```
 
-The server doesn't start. This is a hard requirement—without an API key, the SDK runtime can't function.
+In this mode, the server spawns `claude` CLI subprocesses that use your existing OAuth or API key configuration. This is the recommended mode for most users.
+
+**Direct API Mode (explicit API key)**:
+```bash
+ANTHROPIC_API_KEY=sk-ant-... gt serve --runtime sdk
+
+# Output:
+SDK runtime: using direct Anthropic API
+Gas Town API server listening on :8080
+```
+
+In this mode, the server calls the Anthropic API directly, bypassing Claude Code. This is useful for isolated deployments or when you need precise control over API calls.
 
 ---
 
@@ -486,11 +500,14 @@ The Gas Town SDK Integration transforms what was a terminal-bound orchestration 
 Start experimenting:
 
 ```bash
-# Headless API server
-ANTHROPIC_API_KEY=sk-ant-... gt serve --runtime sdk
+# Headless API server (uses your existing Claude Code auth)
+gt serve --runtime sdk
 
 # Or with terminal support
 gt serve --runtime tmux
+
+# Or with explicit API key for direct API calls
+ANTHROPIC_API_KEY=sk-ant-... gt serve --runtime sdk
 ```
 
 Then hit `http://localhost:8080/health` and start building.

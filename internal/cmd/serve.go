@@ -2,6 +2,7 @@
 package cmd
 
 import (
+	"log"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -11,9 +12,13 @@ import (
 )
 
 var serveCmd = &cobra.Command{
-	Use:     "serve",
-	Short:   "Start the Gas Town API server",
-	Long:    `Start a REST/WebSocket API server for programmatic access to Gas Town agent operations.`,
+	Use:   "serve",
+	Short: "Start the Gas Town API server",
+	Long: `Start a REST/WebSocket API server for programmatic access to Gas Town agent operations.
+
+The SDK runtime operates in two modes:
+  - If ANTHROPIC_API_KEY is set, uses direct Anthropic API calls
+  - Otherwise, spawns Claude Code CLI subprocesses (uses your existing OAuth/auth)`,
 	GroupID: GroupServices,
 	RunE:    runServe,
 }
@@ -35,14 +40,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	var rt runtime.AgentRuntime
 
 	if serveRuntimeType == "sdk" {
-		apiKey := os.Getenv("ANTHROPIC_API_KEY")
-		if apiKey == "" {
-			cmd.PrintErrln("ANTHROPIC_API_KEY environment variable required for SDK runtime")
-			return nil
-		}
-
 		sdkRuntime, err := runtime.NewSDKRuntime(&config.SDKRuntimeConfig{
-			APIKey:    apiKey,
 			Model:     "claude-sonnet-4-20250514",
 			MaxTokens: 4096,
 		})
@@ -50,6 +48,13 @@ func runServe(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		rt = sdkRuntime
+
+		// Log which mode we're using
+		if os.Getenv("ANTHROPIC_API_KEY") != "" {
+			log.Println("SDK runtime: using direct Anthropic API")
+		} else {
+			log.Println("SDK runtime: using Claude Code CLI (existing auth)")
+		}
 	} else {
 		rt = runtime.NewTmuxRuntime()
 	}
