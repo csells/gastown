@@ -1540,6 +1540,172 @@ WantedBy=multi-user.target
 
 ---
 
+## Theme Switcher Implementation
+
+### Overview
+
+The dashboard includes a comprehensive theme system with three modes: Light, Dark, and System (follows OS preference). The theme switcher is positioned in the upper right corner with persistent user preference storage.
+
+### Theme Modes
+
+| Mode | Icon | Behavior |
+|------|------|----------|
+| Light | ☀️ | Forces light theme regardless of OS settings |
+| Dark | 🌙 | Forces dark theme (original terminal style) |
+| System | 💻 | Follows OS preference (default) |
+
+### CSS Implementation
+
+**CSS Variables for Theming:**
+
+```css
+:root {
+  /* Light theme colors */
+  --bg-color-light: #f5f5f5;
+  --text-color-light: #1a1a2e;
+  --bg-secondary-light: #e0e0e0;
+  --table-bg-light: #ffffff;
+
+  /* Dark theme colors */
+  --bg-color-dark: #1a1a2e;
+  --text-color-dark: #eaeaea;
+  --bg-secondary-dark: #2d2d44;
+  --table-bg-dark: transparent;
+}
+
+/* System theme - respects OS preference */
+html[data-theme="system"] {
+  --bg-color: var(--bg-color-dark);
+  --text-color: var(--text-color-dark);
+}
+
+@media (prefers-color-scheme: light) {
+  html[data-theme="system"] {
+    --bg-color: var(--bg-color-light);
+    --text-color: var(--text-color-light);
+  }
+}
+
+/* Forced themes */
+html[data-theme="dark"] { /* dark colors */ }
+html[data-theme="light"] { /* light colors */ }
+```
+
+### JavaScript Implementation
+
+**Theme Switcher Logic:**
+
+```javascript
+const THEME_KEY = 'gastown-dashboard-theme';
+const html = document.documentElement;
+
+// Load saved theme or default to 'system'
+function loadTheme() {
+  const savedTheme = localStorage.getItem(THEME_KEY) || 'system';
+  setTheme(savedTheme);
+}
+
+// Set theme and update UI
+function setTheme(theme) {
+  html.setAttribute('data-theme', theme);
+  localStorage.setItem(THEME_KEY, theme);
+  updateButtonStates(theme);
+}
+
+// Listen for OS theme changes when in system mode
+const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+mediaQuery.addEventListener('change', () => {
+  if (getCurrentTheme() === 'system') {
+    // Force repaint to update system theme
+  }
+});
+```
+
+### UI Components
+
+**Theme Switcher HTML:**
+
+```html
+<div class="theme-switcher">
+  <button class="theme-btn" data-theme="light">☀️ Light</button>
+  <button class="theme-btn" data-theme="dark">🌙 Dark</button>
+  <button class="theme-btn active" data-theme="system">💻 System</button>
+</div>
+```
+
+**Styling:**
+
+```css
+.theme-switcher {
+  position: fixed;
+  top: 2rem;
+  right: 2rem;
+  display: flex;
+  gap: 0.5rem;
+  background-color: var(--bg-secondary);
+  padding: 0.5rem;
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  z-index: 1000;
+}
+
+.theme-btn {
+  background: transparent;
+  border: 2px solid transparent;
+  padding: 0.5rem 1rem;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.theme-btn:hover {
+  background-color: rgba(74, 158, 255, 0.2);
+  border-color: #4a9eff;
+}
+
+.theme-btn.active {
+  background-color: #4a9eff;
+  color: #fff;
+}
+```
+
+### Features
+
+1. **Persistent Preference**: Theme choice saved to localStorage
+2. **Default System Mode**: Follows OS preference by default
+3. **Smooth Transitions**: 0.3s ease transitions between themes
+4. **Dynamic OS Detection**: Updates automatically when OS theme changes
+5. **Visual Feedback**: Active button highlighted, hover effects
+6. **All Elements Themed**: Tables, progress bars, code blocks, empty states
+
+### Color Specifications
+
+**Light Theme:**
+- Background: #f5f5f5
+- Text: #1a1a2e
+- Tables: White with light gray borders
+- Code blocks: #e8e8e8
+
+**Dark Theme:**
+- Background: #1a1a2e
+- Text: #eaeaea
+- Tables: Transparent with dark borders
+- Code blocks: #2d2d44
+
+Both themes maintain the same:
+- Accent color: #4a9eff
+- Activity indicators: Green/Yellow/Red
+- Work status badges: Color-coded
+
+### Accessibility
+
+- High contrast maintained in both themes
+- Color-blind safe activity indicators (shape + color)
+- Keyboard accessible theme buttons
+- Respects OS preference by default
+
+---
+
 ## Feature Parity Checklist
 
 - [x] Display open convoys with tracked issues
@@ -1550,6 +1716,7 @@ WantedBy=multi-user.target
 - [x] Display polecat workers with session info
 - [x] Auto-refresh every 10 seconds via HTMX
 - [x] Dark theme with monospace font
+- [x] Light/Dark/System theme switcher with persistence
 - [x] No authentication (localhost only)
 - [x] Use bd CLI for beads data
 - [x] Use tmux CLI for worker activity
