@@ -1,17 +1,102 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="system">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Gas Town Dashboard</title>
   <script src="https://unpkg.com/htmx.org@1.9.10"></script>
   <style>
+    /* Theme color definitions */
+    :root {
+      /* Light theme colors */
+      --bg-color-light: #f5f5f5;
+      --text-color-light: #1a1a2e;
+      --bg-secondary-light: #e0e0e0;
+      --border-color-light: #4a9eff;
+      --table-bg-light: #ffffff;
+      --table-header-bg-light: #e8e8e8;
+      --table-border-light: #d0d0d0;
+      --table-hover-light: rgba(74, 158, 255, 0.1);
+      --code-bg-light: #e8e8e8;
+      --empty-state-light: #666;
+
+      /* Dark theme colors */
+      --bg-color-dark: #1a1a2e;
+      --text-color-dark: #eaeaea;
+      --bg-secondary-dark: #2d2d44;
+      --border-color-dark: #4a9eff;
+      --table-bg-dark: transparent;
+      --table-header-bg-dark: #2d2d44;
+      --table-border-dark: #2d2d44;
+      --table-hover-dark: rgba(74, 158, 255, 0.1);
+      --code-bg-dark: #2d2d44;
+      --empty-state-dark: #888;
+    }
+
+    /* System theme (respects OS preference) */
+    html[data-theme="system"] {
+      --bg-color: var(--bg-color-dark);
+      --text-color: var(--text-color-dark);
+      --bg-secondary: var(--bg-secondary-dark);
+      --border-color: var(--border-color-dark);
+      --table-bg: var(--table-bg-dark);
+      --table-header-bg: var(--table-header-bg-dark);
+      --table-border: var(--table-border-dark);
+      --table-hover: var(--table-hover-dark);
+      --code-bg: var(--code-bg-dark);
+      --empty-state-color: var(--empty-state-dark);
+    }
+
+    @media (prefers-color-scheme: light) {
+      html[data-theme="system"] {
+        --bg-color: var(--bg-color-light);
+        --text-color: var(--text-color-light);
+        --bg-secondary: var(--bg-secondary-light);
+        --border-color: var(--border-color-light);
+        --table-bg: var(--table-bg-light);
+        --table-header-bg: var(--table-header-bg-light);
+        --table-border: var(--table-border-light);
+        --table-hover: var(--table-hover-light);
+        --code-bg: var(--code-bg-light);
+        --empty-state-color: var(--empty-state-light);
+      }
+    }
+
+    /* Dark theme (forced) */
+    html[data-theme="dark"] {
+      --bg-color: var(--bg-color-dark);
+      --text-color: var(--text-color-dark);
+      --bg-secondary: var(--bg-secondary-dark);
+      --border-color: var(--border-color-dark);
+      --table-bg: var(--table-bg-dark);
+      --table-header-bg: var(--table-header-bg-dark);
+      --table-border: var(--table-border-dark);
+      --table-hover: var(--table-hover-dark);
+      --code-bg: var(--code-bg-dark);
+      --empty-state-color: var(--empty-state-dark);
+    }
+
+    /* Light theme (forced) */
+    html[data-theme="light"] {
+      --bg-color: var(--bg-color-light);
+      --text-color: var(--text-color-light);
+      --bg-secondary: var(--bg-secondary-light);
+      --border-color: var(--border-color-light);
+      --table-bg: var(--table-bg-light);
+      --table-header-bg: var(--table-header-bg-light);
+      --table-border: var(--table-border-light);
+      --table-hover: var(--table-hover-light);
+      --code-bg: var(--code-bg-light);
+      --empty-state-color: var(--empty-state-light);
+    }
+
     body {
-      background-color: #1a1a2e;
-      color: #eaeaea;
+      background-color: var(--bg-color);
+      color: var(--text-color);
       font-family: 'Courier New', monospace;
       margin: 0;
       padding: 2rem;
+      transition: background-color 0.3s ease, color 0.3s ease;
     }
 
     .container {
@@ -47,12 +132,13 @@
     }
 
     .progress-bar {
-      background-color: #2d2d44;
+      background-color: var(--bg-secondary);
       height: 20px;
       border-radius: 4px;
       overflow: hidden;
       position: relative;
       flex: 1;
+      transition: background-color 0.3s ease;
     }
 
     .progress-fill {
@@ -95,17 +181,19 @@
     th {
       text-align: left;
       padding: 12px;
-      background-color: #2d2d44;
-      border-bottom: 2px solid #4a9eff;
+      background-color: var(--table-header-bg);
+      border-bottom: 2px solid var(--border-color);
+      transition: background-color 0.3s ease;
     }
 
     td {
       padding: 12px;
-      border-bottom: 1px solid #2d2d44;
+      border-bottom: 1px solid var(--table-border);
+      transition: border-color 0.3s ease;
     }
 
     tr:hover {
-      background-color: rgba(74, 158, 255, 0.1);
+      background-color: var(--table-hover);
     }
 
     h1 {
@@ -131,20 +219,77 @@
     }
 
     code {
-      background-color: #2d2d44;
+      background-color: var(--code-bg);
       padding: 2px 6px;
       border-radius: 3px;
       font-family: 'Courier New', monospace;
+      transition: background-color 0.3s ease;
     }
 
     .empty-state {
-      color: #888;
+      color: var(--empty-state-color);
       font-style: italic;
       padding: 1rem 0;
+    }
+
+    /* Theme switcher styles */
+    .theme-switcher {
+      position: fixed;
+      top: 2rem;
+      right: 2rem;
+      display: flex;
+      gap: 0.5rem;
+      background-color: var(--bg-secondary);
+      padding: 0.5rem;
+      border-radius: 8px;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+      transition: background-color 0.3s ease;
+      z-index: 1000;
+    }
+
+    .theme-btn {
+      background: transparent;
+      border: 2px solid transparent;
+      color: var(--text-color);
+      padding: 0.5rem 1rem;
+      border-radius: 6px;
+      cursor: pointer;
+      font-family: 'Courier New', monospace;
+      font-size: 14px;
+      transition: all 0.2s ease;
+    }
+
+    .theme-btn:hover {
+      background-color: rgba(74, 158, 255, 0.2);
+      border-color: #4a9eff;
+    }
+
+    .theme-btn.active {
+      background-color: #4a9eff;
+      color: #fff;
+      border-color: #4a9eff;
+    }
+
+    .header-wrapper {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 2rem;
+    }
+
+    .header-wrapper h1 {
+      margin: 0;
     }
   </style>
 </head>
 <body>
+  <!-- Theme Switcher -->
+  <div class="theme-switcher">
+    <button class="theme-btn" data-theme="light" title="Light Mode">☀️ Light</button>
+    <button class="theme-btn" data-theme="dark" title="Dark Mode">🌙 Dark</button>
+    <button class="theme-btn active" data-theme="system" title="System Theme">💻 System</button>
+  </div>
+
   <div class="container" hx-get="/" hx-trigger="every 10s" hx-swap="innerHTML">
     <h1>🚂 Gas Town Dashboard</h1>
 
@@ -252,5 +397,58 @@
       </table>
     <% } %>
   </div>
+
+  <script>
+    // Theme switcher functionality
+    (function() {
+      const THEME_KEY = 'gastown-dashboard-theme';
+      const html = document.documentElement;
+      const themeButtons = document.querySelectorAll('.theme-btn');
+
+      // Load saved theme or default to 'system'
+      function loadTheme() {
+        const savedTheme = localStorage.getItem(THEME_KEY) || 'system';
+        setTheme(savedTheme);
+      }
+
+      // Set theme and update UI
+      function setTheme(theme) {
+        html.setAttribute('data-theme', theme);
+        localStorage.setItem(THEME_KEY, theme);
+
+        // Update button states
+        themeButtons.forEach(btn => {
+          if (btn.dataset.theme === theme) {
+            btn.classList.add('active');
+          } else {
+            btn.classList.remove('active');
+          }
+        });
+      }
+
+      // Add click handlers to theme buttons
+      themeButtons.forEach(btn => {
+        btn.addEventListener('click', () => {
+          setTheme(btn.dataset.theme);
+        });
+      });
+
+      // Initialize theme on load
+      loadTheme();
+
+      // Listen for system theme changes when in system mode
+      if (window.matchMedia) {
+        const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+        mediaQuery.addEventListener('change', () => {
+          const currentTheme = localStorage.getItem(THEME_KEY);
+          if (currentTheme === 'system') {
+            // Force a repaint by toggling the attribute
+            const theme = html.getAttribute('data-theme');
+            html.setAttribute('data-theme', theme);
+          }
+        });
+      }
+    })();
+  </script>
 </body>
 </html>
