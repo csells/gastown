@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="system">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Gas Town Dashboard</title>
+  <script src="https://unpkg.com/htmx.org@1.9.10"></script>
+  <style>
+    /* Theme color definitions */
+    :root {
+      /* Light theme colors */
+      --bg-color-light: #f5f5f5;
+      --text-color-light: #1a1a2e;
+      --bg-secondary-light: #e0e0e0;
+      --border-color-light: #4a9eff;
+      --table-bg-light: #ffffff;
+      --table-header-bg-light: #e8e8e8;
+      --table-border-light: #d0d0d0;
+      --table-hover-light: rgba(74, 158, 255, 0.1);
+      --code-bg-light: #e8e8e8;
+      --empty-state-light: #666;
+
+      /* Dark theme colors */
+      --bg-color-dark: #1a1a2e;
+      --text-color-dark: #eaeaea;
+      --bg-secondary-dark: #2d2d44;
+      --border-color-dark: #4a9eff;
+      --table-bg-dark: transparent;
+      --table-header-bg-dark: #2d2d44;
+      --table-border-dark: #2d2d44;
+      --table-hover-dark: rgba(74, 158, 255, 0.1);
+      --code-bg-dark: #2d2d44;
+      --empty-state-dark: #888;
+    }
+
+    /* System theme (respects OS preference) */
+    html[data-theme="system"] {
+      --bg-color: var(--bg-color-dark);
+      --text-color: var(--text-color-dark);
+      --bg-secondary: var(--bg-secondary-dark);
+      --border-color: var(--border-color-dark);
+      --table-bg: var(--table-bg-dark);
+      --table-header-bg: var(--table-header-bg-dark);
+      --table-border: var(--table-border-dark);
+      --table-hover: var(--table-hover-dark);
+      --code-bg: var(--code-bg-dark);
+      --empty-state-color: var(--empty-state-dark);
+    }
+
+    @media (prefers-color-scheme: light) {
+      html[data-theme="system"] {
+        --bg-color: var(--bg-color-light);
+        --text-color: var(--text-color-light);
+        --bg-secondary: var(--bg-secondary-light);
+        --border-color: var(--border-color-light);
+        --table-bg: var(--table-bg-light);
+        --table-header-bg: var(--table-header-bg-light);
+        --table-border: var(--table-border-light);
+        --table-hover: var(--table-hover-light);
+        --code-bg: var(--code-bg-light);
+        --empty-state-color: var(--empty-state-light);
+      }
+    }
+
+    /* Dark theme (forced) */
+    html[data-theme="dark"] {
+      --bg-color: var(--bg-color-dark);
+      --text-color: var(--text-color-dark);
+      --bg-secondary: var(--bg-secondary-dark);
+      --border-color: var(--border-color-dark);
+      --table-bg: var(--table-bg-dark);
+      --table-header-bg: var(--table-header-bg-dark);
+      --table-border: var(--table-border-dark);
+      --table-hover: var(--table-hover-dark);
+      --code-bg: var(--code-bg-dark);
+      --empty-state-color: var(--empty-state-dark);
+    }
+
+    /* Light theme (forced) */
+    html[data-theme="light"] {
+      --bg-color: var(--bg-color-light);
+      --text-color: var(--text-color-light);
+      --bg-secondary: var(--bg-secondary-light);
+      --border-color: var(--border-color-light);
+      --table-bg: var(--table-bg-light);
+      --table-header-bg: var(--table-header-bg-light);
+      --table-border: var(--table-border-light);
+      --table-hover: var(--table-hover-light);
+      --code-bg: var(--code-bg-light);
+      --empty-state-color: var(--empty-state-light);
+    }
+
+    body {
+      background-color: var(--bg-color);
+      color: var(--text-color);
+      font-family: 'Courier New', monospace;
+      margin: 0;
+      padding: 2rem;
+      transition: background-color 0.3s ease, color 0.3s ease;
+    }
+
+    .container {
+      max-width: 1400px;
+      margin: 0 auto;
+    }
+
+    .activity-dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      display: inline-block;
+      margin-right: 8px;
+    }
+
+    .activity-green {
+      background-color: #00ff00;
+      box-shadow: 0 0 8px #00ff00;
+    }
+
+    .activity-yellow {
+      background-color: #ffff00;
+      box-shadow: 0 0 8px #ffff00;
+    }
+
+    .activity-red {
+      background-color: #ff0000;
+      box-shadow: 0 0 8px #ff0000;
+    }
+
+    .activity-unknown {
+      background-color: #666666;
+    }
+
+    .progress-bar {
+      background-color: var(--bg-secondary);
+      height: 20px;
+      border-radius: 4px;
+      overflow: hidden;
+      position: relative;
+      flex: 1;
+      transition: background-color 0.3s ease;
+    }
+
+    .progress-fill {
+      background-color: #4a9eff;
+      height: 100%;
+      transition: width 0.3s ease;
+    }
+
+    .progress-container {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+
+    .work-status {
+      padding: 4px 12px;
+      border-radius: 4px;
+      font-size: 12px;
+      font-weight: bold;
+      text-transform: uppercase;
+      display: inline-block;
+    }
+
+    .work-status.complete { background-color: #00aa00; }
+    .work-status.active { background-color: #4a9eff; }
+    .work-status.stale { background-color: #ffaa00; }
+    .work-status.stuck { background-color: #ff4444; }
+    .work-status.waiting { background-color: #666666; }
+
+    .mq-green { background-color: rgba(0, 170, 0, 0.2); }
+    .mq-yellow { background-color: rgba(255, 170, 0, 0.2); }
+    .mq-red { background-color: rgba(255, 68, 68, 0.2); }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-bottom: 2rem;
+    }
+
+    th {
+      text-align: left;
+      padding: 12px;
+      background-color: var(--table-header-bg);
+      border-bottom: 2px solid var(--border-color);
+      transition: background-color 0.3s ease;
+    }
+
+    td {
+      padding: 12px;
+      border-bottom: 1px solid var(--table-border);
+      transition: border-color 0.3s ease;
+    }
+
+    tr:hover {
+      background-color: var(--table-hover);
+    }
+
+    h1 {
+      color: #4a9eff;
+      margin-bottom: 2rem;
+      font-size: 32px;
+    }
+
+    h2 {
+      color: #4a9eff;
+      margin-top: 3rem;
+      margin-bottom: 1rem;
+      font-size: 24px;
+    }
+
+    a {
+      color: #4a9eff;
+      text-decoration: none;
+    }
+
+    a:hover {
+      text-decoration: underline;
+    }
+
+    code {
+      background-color: var(--code-bg);
+      padding: 2px 6px;
+      border-radius: 3px;
+      font-family: 'Courier New', monospace;
+      transition: background-color 0.3s ease;
+    }
+
+    .empty-state {
+      color: var(--empty-state-color);
+      font-style: italic;
+      padding: 1rem 0;
+    }
+
+    /* Theme switcher styles */
+    .theme-switcher {
+      position: fixed;
+      top: 2rem;
+      right: 2rem;
+      display: flex;
+      gap: 0.5rem;
+      background-color: var(--bg-secondary);
+      padding: 0.5rem;
+      border-radius: 8px;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+      transition: background-color 0.3s ease;
+      z-index: 1000;
+    }
+
+    .theme-btn {
+      background: transparent;
+      border: 2px solid transparent;
+      color: var(--text-color);
+      padding: 0.5rem 1rem;
+      border-radius: 6px;
+      cursor: pointer;
+      font-family: 'Courier New', monospace;
+      font-size: 14px;
+      transition: all 0.2s ease;
+    }
+
+    .theme-btn:hover {
+      background-color: rgba(74, 158, 255, 0.2);
+      border-color: #4a9eff;
+    }
+
+    .theme-btn.active {
+      background-color: #4a9eff;
+      color: #fff;
+      border-color: #4a9eff;
+    }
+
+    .header-wrapper {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 2rem;
+    }
+
+    .header-wrapper h1 {
+      margin: 0;
+    }
+  </style>
+</head>
+<body>
+  <!-- Theme Switcher -->
+  <div class="theme-switcher">
+    <button class="theme-btn" data-theme="light" title="Light Mode">☀️ Light</button>
+    <button class="theme-btn" data-theme="dark" title="Dark Mode">🌙 Dark</button>
+    <button class="theme-btn active" data-theme="system" title="System Theme">💻 System</button>
+  </div>
+
+  <div class="container" hx-get="/" hx-trigger="every 10s" hx-swap="innerHTML">
+    <h1>🚂 Gas Town Dashboard</h1>
+
+    <!-- Convoys Section -->
+    <h2>🎯 Convoys</h2>
+    <% if (convoys.length === 0) { %>
+      <p class="empty-state">No open convoys</p>
+    <% } else { %>
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Title</th>
+            <th>Status</th>
+            <th>Progress</th>
+            <th>Activity</th>
+          </tr>
+        </thead>
+        <tbody>
+          <% convoys.forEach(convoy => { %>
+            <tr>
+              <td><code><%= convoy.id %></code></td>
+              <td><%= convoy.title %></td>
+              <td>
+                <span class="work-status <%= convoy.workStatus %>">
+                  <%= convoy.workStatus %>
+                </span>
+              </td>
+              <td>
+                <div class="progress-container">
+                  <div class="progress-bar">
+                    <div class="progress-fill" style="width: <%= convoy.total > 0 ? (convoy.completed / convoy.total * 100) : 0 %>%"></div>
+                  </div>
+                  <span style="min-width: 3rem; text-align: right;"><%= convoy.progress %></span>
+                </div>
+              </td>
+              <td>
+                <span class="activity-dot activity-<%= convoy.lastActivity.color %>"></span>
+                <%= convoy.lastActivity.text %>
+              </td>
+            </tr>
+          <% }); %>
+        </tbody>
+      </table>
+    <% } %>
+
+    <!-- Merge Queue Section -->
+    <h2>📋 Merge Queue</h2>
+    <% if (mergeQueue.length === 0) { %>
+      <p class="empty-state">No open pull requests</p>
+    <% } else { %>
+      <table>
+        <thead>
+          <tr>
+            <th>Repo</th>
+            <th>PR</th>
+            <th>Title</th>
+            <th>CI Status</th>
+            <th>Mergeable</th>
+          </tr>
+        </thead>
+        <tbody>
+          <% mergeQueue.forEach(pr => { %>
+            <tr class="<%= pr.colorClass %>">
+              <td><%= pr.repo %></td>
+              <td><a href="<%= pr.url %>" target="_blank">#<%= pr.number %></a></td>
+              <td><%= pr.title %></td>
+              <td><%= pr.ciStatus %></td>
+              <td><%= pr.mergeable %></td>
+            </tr>
+          <% }); %>
+        </tbody>
+      </table>
+    <% } %>
+
+    <!-- Polecat Workers Section -->
+    <h2>🐱 Polecat Workers</h2>
+    <% if (polecats.length === 0) { %>
+      <p class="empty-state">No active workers</p>
+    <% } else { %>
+      <table>
+        <thead>
+          <tr>
+            <th>Worker</th>
+            <th>Rig</th>
+            <th>Session</th>
+            <th>Activity</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          <% polecats.forEach(polecat => { %>
+            <tr>
+              <td><%= polecat.name %></td>
+              <td><%= polecat.rig %></td>
+              <td><code><%= polecat.sessionId %></code></td>
+              <td>
+                <span class="activity-dot activity-<%= polecat.lastActivity.color %>"></span>
+                <%= polecat.lastActivity.text %>
+              </td>
+              <td style="color: #888; font-size: 0.9em;"><%= polecat.statusHint %></td>
+            </tr>
+          <% }); %>
+        </tbody>
+      </table>
+    <% } %>
+  </div>
+
+  <script>
+    // Theme switcher functionality
+    (function() {
+      const THEME_KEY = 'gastown-dashboard-theme';
+      const html = document.documentElement;
+      const themeButtons = document.querySelectorAll('.theme-btn');
+
+      // Load saved theme or default to 'system'
+      function loadTheme() {
+        const savedTheme = localStorage.getItem(THEME_KEY) || 'system';
+        setTheme(savedTheme);
+      }
+
+      // Set theme and update UI
+      function setTheme(theme) {
+        html.setAttribute('data-theme', theme);
+        localStorage.setItem(THEME_KEY, theme);
+
+        // Update button states
+        themeButtons.forEach(btn => {
+          if (btn.dataset.theme === theme) {
+            btn.classList.add('active');
+          } else {
+            btn.classList.remove('active');
+          }
+        });
+      }
+
+      // Add click handlers to theme buttons
+      themeButtons.forEach(btn => {
+        btn.addEventListener('click', () => {
+          setTheme(btn.dataset.theme);
+        });
+      });
+
+      // Initialize theme on load
+      loadTheme();
+
+      // Listen for system theme changes when in system mode
+      if (window.matchMedia) {
+        const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+        mediaQuery.addEventListener('change', () => {
+          const currentTheme = localStorage.getItem(THEME_KEY);
+          if (currentTheme === 'system') {
+            // Force a repaint by toggling the attribute
+            const theme = html.getAttribute('data-theme');
+            html.setAttribute('data-theme', theme);
+          }
+        });
+      }
+    })();
+  </script>
+</body>
+</html>
