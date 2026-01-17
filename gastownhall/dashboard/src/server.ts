@@ -28,13 +28,13 @@ export class DashboardServer {
     this.app.use(express.static(path.join(__dirname, '../public')));
 
     // Request logging
-    this.app.use((req, res, next) => {
+    this.app.use((req, _res, next) => {
       logger.debug(`${req.method} ${req.path}`);
       next();
     });
 
     // Timeout error handler
-    this.app.use((req, res, next) => {
+    this.app.use((req, _res, next) => {
       if (!req.timedout) next();
     });
   }
@@ -44,7 +44,7 @@ export class DashboardServer {
     this.app.get('/', (req, res) => this.controller.renderDashboard(req, res));
 
     // Health check
-    this.app.get('/health', (req, res) => {
+    this.app.get('/health', (_req, res) => {
       res.json({ status: 'ok' });
     });
   }
