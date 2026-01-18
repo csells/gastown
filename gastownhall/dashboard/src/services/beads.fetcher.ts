@@ -34,22 +34,20 @@ export class BeadsFetcher {
   }
 
   /**
-   * Fetch tracked issues for a convoy using dependencies
+   * Fetch tracked issues for a convoy using bd dep list
    */
   async fetchTrackedIssues(convoyId: string): Promise<string[]> {
-    try {
-      // Escape single quotes in convoy ID for SQLite
-      const escapedId = convoyId.replace(/'/g, "''");
-      const query = `SELECT depends_on_id FROM dependencies WHERE issue_id = '${escapedId}' AND type = 'tracks'`;
-      const beadsDir = config.beadsDir;
-      const command = `sqlite3 ${beadsDir}/beads.db "${query}"`;
-
-      const { stdout } = await CLIExecutor.execute(command, { throwOnError: false });
-      return stdout.trim().split('\n').filter(id => id.length > 0);
-    } catch (error) {
-      logger.error(`Failed to fetch tracked issues for ${convoyId}`, error);
-      return [];
+    interface DepListItem {
+      id: string;
+      type: string;
     }
+
+    const result = await CLIExecutor.executeJSON<DepListItem[]>(
+      `bd dep list ${convoyId} --direction=down -t tracks --json`,
+      { throwOnError: false }
+    );
+
+    return (result || []).map(item => item.id);
   }
 
   /**
