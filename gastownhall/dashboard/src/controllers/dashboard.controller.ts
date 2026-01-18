@@ -12,18 +12,32 @@ export class DashboardController {
   /**
    * Render dashboard page
    */
-  async renderDashboard(req: Request, res: Response): Promise<void> {
-    try {
-      const data = await this.convoyService.fetchDashboardData();
+  async renderDashboard(_req: Request, res: Response): Promise<void> {
+    const data = await this.convoyService.fetchDashboardData();
 
-      res.render('dashboard', {
-        convoys: data.convoys,
-        mergeQueue: data.mergeQueue,
-        polecats: data.polecats
-      });
-    } catch (error) {
-      logger.error('Failed to render dashboard', error);
-      res.status(500).send('Internal Server Error');
+    res.render('dashboard', {
+      convoys: data.convoys,
+      mergeQueue: data.mergeQueue,
+      rigs: data.rigs,
+      townBeads: data.townBeads
+    });
+  }
+
+  /**
+   * Render rig details partial (for HTMX)
+   */
+  async renderRigDetails(req: Request, res: Response): Promise<void> {
+    const rigName = req.params.name;
+
+    if (!rigName) {
+      res.status(400).send('Rig name required');
+      return;
     }
+
+    const details = await this.convoyService.fetchRigDetails(rigName);
+
+    res.render('partials/rig-details', {
+      rig: details
+    });
   }
 }

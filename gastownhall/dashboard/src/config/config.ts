@@ -5,7 +5,7 @@ export interface Config {
   beadsDir: string;
   logLevel: string;
   githubRepos: string[];
-  gtTownRoot?: string;
+  gtTownRoot: string;
 }
 
 function validateConfig(): Config {
@@ -26,7 +26,7 @@ function validateConfig(): Config {
     ? process.env.GITHUB_REPOS.split(',').map(r => r.trim()).filter(r => r.length > 0)
     : [];
 
-  const gtTownRoot = process.env.GT_TOWN_ROOT;
+  const gtTownRoot = process.env.GT_TOWN_ROOT || `${process.env.HOME}/gt`;
 
   return {
     port,

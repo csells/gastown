@@ -1,7 +1,24 @@
-import { ConvoyData, ConvoyRow, TrackedIssue, MergeQueueRow, PolecatRow } from '../models/convoy.model';
+import {
+  ConvoyData,
+  ConvoyRow,
+  TrackedIssue,
+  MergeQueueRow,
+  PolecatRow,
+  RigRow,
+  RigDetails,
+  CrewRow,
+  AgentMail,
+  MailRow,
+  PeekOutput,
+  BeadRow
+} from '../models/convoy.model';
 import { BeadsFetcher } from './beads.fetcher';
 import { TmuxFetcher } from './tmux.fetcher';
 import { GitHubFetcher } from './github.fetcher';
+import { RigFetcher } from './rig.fetcher';
+import { CrewFetcher } from './crew.fetcher';
+import { MailFetcher, MailMessage } from './mail.fetcher';
+import { PeekFetcher } from './peek.fetcher';
 import { ActivityCalculator, ActivityInfo } from '../utils/activity';
 import { logger } from '../utils/logger';
 
@@ -9,46 +26,181 @@ export class ConvoyService {
   private beadsFetcher: BeadsFetcher;
   private tmuxFetcher: TmuxFetcher;
   private githubFetcher: GitHubFetcher;
+  private rigFetcher: RigFetcher;
+  private crewFetcher: CrewFetcher;
+  private mailFetcher: MailFetcher;
+  private peekFetcher: PeekFetcher;
 
   constructor() {
     this.beadsFetcher = new BeadsFetcher();
     this.tmuxFetcher = new TmuxFetcher();
     this.githubFetcher = new GitHubFetcher();
+    this.rigFetcher = new RigFetcher();
+    this.crewFetcher = new CrewFetcher();
+    this.mailFetcher = new MailFetcher();
+    this.peekFetcher = new PeekFetcher();
   }
 
   /**
-   * Fetch all dashboard data
+   * Fetch all dashboard data (main view)
    */
   async fetchDashboardData(): Promise<ConvoyData> {
     logger.info('Fetching dashboard data');
 
-    const [convoys, mergeQueue, polecats] = await Promise.all([
+    const [convoys, mergeQueue, rigs, townBeads] = await Promise.all([
       this.fetchConvoys(),
       this.fetchMergeQueue(),
-      this.fetchPolecats()
+      this.fetchRigs(),
+      this.fetchTownBeads()
     ]);
 
-    return { convoys, mergeQueue, polecats };
+    return { convoys, mergeQueue, rigs, townBeads };
+  }
+
+  /**
+   * Fetch rig-specific details (when a rig is selected)
+   */
+  async fetchRigDetails(rigName: string): Promise<RigDetails> {
+    logger.info(`Fetching details for rig: ${rigName}`);
+
+    // Get rig path for beads directory
+    const rigPath = await this.rigFetcher.getRigPath(rigName);
+
+    // Get list of polecats for this rig (need names for mail fetching)
+    const polecatSessions = await this.tmuxFetcher.getPolecatSessions();
+    const rigPolecats = polecatSessions.filter(s => s.rig === rigName);
+    const polecatNames = rigPolecats.map(p => p.worker);
+
+    // Get crew for this rig (need names for peek fetching)
+    const crewList = await this.crewFetcher.fetchCrewForRig(rigName);
+    const crewNames = crewList.filter(c => c.hasSession).map(c => c.name);
+
+    // Fetch all data in parallel
+    const [crew, mail, peek, beads] = await Promise.all([
+      Promise.resolve(crewList.map(c => this.transformCrewRow(c))),
+      this.fetchRigMail(rigName, polecatNames),
+      this.peekFetcher.fetchAllPeekForRig(rigName, polecatNames, crewNames),
+      rigPath ? this.fetchRigBeads(rigPath) : Promise.resolve([])
+    ]);
+
+    // Transform polecats
+    const polecats: PolecatRow[] = rigPolecats.map(session => ({
+      name: session.worker,
+      rig: session.rig,
+      sessionId: session.name,
+      lastActivity: ActivityCalculator.calculate(session.activityTimestamp),
+      statusHint: session.lastOutput
+    }));
+
+    return {
+      name: rigName,
+      crew,
+      polecats,
+      mail,
+      peek: peek.map(p => ({
+        worker: p.worker,
+        workerType: p.workerType,
+        output: p.output,
+        timestamp: p.timestamp
+      })),
+      beads
+    };
+  }
+
+  /**
+   * Fetch rigs list
+   */
+  private async fetchRigs(): Promise<RigRow[]> {
+    const rigs = await this.rigFetcher.fetchRigs();
+    return rigs.map(rig => ({
+      name: rig.name,
+      polecatCount: rig.polecatCount,
+      crewCount: rig.crewCount,
+      agents: rig.agents
+    }));
+  }
+
+  /**
+   * Fetch town-level beads (hq-* prefix)
+   */
+  private async fetchTownBeads(): Promise<BeadRow[]> {
+    const beads = await this.beadsFetcher.fetchTownBeads();
+    return beads.map(bead => ({
+      id: bead.id,
+      title: bead.title,
+      status: bead.status,
+      priority: bead.priority ?? 2,
+      issueType: bead.issue_type ?? 'task',
+      labels: bead.labels ?? []
+    }));
+  }
+
+  /**
+   * Fetch rig-level beads
+   */
+  private async fetchRigBeads(rigPath: string): Promise<BeadRow[]> {
+    const beads = await this.beadsFetcher.fetchRigBeads(rigPath);
+    return beads.map(bead => ({
+      id: bead.id,
+      title: bead.title,
+      status: bead.status,
+      priority: bead.priority ?? 2,
+      issueType: bead.issue_type ?? 'task',
+      labels: bead.labels ?? []
+    }));
+  }
+
+  /**
+   * Fetch mail for all agents in a rig
+   */
+  private async fetchRigMail(rigName: string, polecatNames: string[]): Promise<AgentMail[]> {
+    const agentMails = await this.mailFetcher.fetchAllMailForRig(rigName, polecatNames);
+
+    return agentMails.map(am => ({
+      agent: am.agent,
+      agentType: am.agentType,
+      messages: am.messages.map(msg => this.transformMailMessage(msg))
+    }));
+  }
+
+  private transformMailMessage(msg: MailMessage): MailRow {
+    const timestamp = new Date(msg.timestamp);
+    return {
+      id: msg.id,
+      from: msg.from,
+      to: msg.to,
+      subject: msg.subject,
+      timestamp,
+      read: msg.read,
+      priority: msg.priority || 'normal',
+      type: msg.type || 'notification',
+      lastActivity: ActivityCalculator.calculate(timestamp)
+    };
+  }
+
+  private transformCrewRow(crew: { name: string; rig: string; branch: string; hasSession: boolean; gitClean: boolean }): CrewRow {
+    return {
+      name: crew.name,
+      rig: crew.rig,
+      branch: crew.branch,
+      hasSession: crew.hasSession,
+      gitClean: crew.gitClean
+    };
   }
 
   /**
    * Fetch and aggregate convoy data
    */
   private async fetchConvoys(): Promise<ConvoyRow[]> {
-    try {
-      const convoys = await this.beadsFetcher.fetchConvoys();
-      const convoyRows: ConvoyRow[] = [];
+    const convoys = await this.beadsFetcher.fetchConvoys();
+    const convoyRows: ConvoyRow[] = [];
 
-      for (const convoy of convoys) {
-        const row = await this.buildConvoyRow(convoy);
-        convoyRows.push(row);
-      }
-
-      return convoyRows;
-    } catch (error) {
-      logger.error('Failed to fetch convoys', error);
-      return [];
+    for (const convoy of convoys) {
+      const row = await this.buildConvoyRow(convoy);
+      convoyRows.push(row);
     }
+
+    return convoyRows;
   }
 
   /**
@@ -130,31 +282,6 @@ export class ConvoyService {
    * Fetch merge queue data
    */
   private async fetchMergeQueue(): Promise<MergeQueueRow[]> {
-    try {
-      return await this.githubFetcher.fetchMergeQueue();
-    } catch (error) {
-      logger.error('Failed to fetch merge queue', error);
-      return [];
-    }
-  }
-
-  /**
-   * Fetch polecat worker data
-   */
-  private async fetchPolecats(): Promise<PolecatRow[]> {
-    try {
-      const sessions = await this.tmuxFetcher.getPolecatSessions();
-
-      return sessions.map(session => ({
-        name: session.worker,
-        rig: session.rig,
-        sessionId: session.name,
-        lastActivity: ActivityCalculator.calculate(session.activityTimestamp),
-        statusHint: session.lastOutput
-      }));
-    } catch (error) {
-      logger.error('Failed to fetch polecats', error);
-      return [];
-    }
+    return this.githubFetcher.fetchMergeQueue();
   }
 }

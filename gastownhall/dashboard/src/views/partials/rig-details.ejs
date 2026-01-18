@@ -1,0 +1,175 @@
+<div class="rig-details">
+  <h3>Rig: <%= rig.name %></h3>
+
+  <!-- Crew Workspaces -->
+  <h4>Crew Workspaces</h4>
+  <% if (rig.crew.length === 0) { %>
+    <p class="empty-state">No crew workspaces</p>
+  <% } else { %>
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Branch</th>
+          <th>Session</th>
+          <th>Git Status</th>
+        </tr>
+      </thead>
+      <tbody>
+        <% rig.crew.forEach(c => { %>
+          <tr>
+            <td><%= c.name %></td>
+            <td><code><%= c.branch %></code></td>
+            <td>
+              <% if (c.hasSession) { %>
+                <span class="activity-dot activity-green"></span>active
+              <% } else { %>
+                <span class="activity-dot activity-unknown"></span>inactive
+              <% } %>
+            </td>
+            <td>
+              <% if (c.gitClean) { %>
+                <span style="color: #00aa00;">clean</span>
+              <% } else { %>
+                <span style="color: #ffaa00;">dirty</span>
+              <% } %>
+            </td>
+          </tr>
+        <% }); %>
+      </tbody>
+    </table>
+  <% } %>
+
+  <!-- Polecat Workers -->
+  <h4>Polecat Workers</h4>
+  <% if (rig.polecats.length === 0) { %>
+    <p class="empty-state">No active polecats</p>
+  <% } else { %>
+    <table>
+      <thead>
+        <tr>
+          <th>Worker</th>
+          <th>Session</th>
+          <th>Activity</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody>
+        <% rig.polecats.forEach(polecat => { %>
+          <tr>
+            <td><%= polecat.name %></td>
+            <td><code><%= polecat.sessionId %></code></td>
+            <td>
+              <span class="activity-dot activity-<%= polecat.lastActivity.color %>"></span>
+              <%= polecat.lastActivity.text %>
+            </td>
+            <td style="color: #888; font-size: 0.9em;"><%= polecat.statusHint %></td>
+          </tr>
+        <% }); %>
+      </tbody>
+    </table>
+  <% } %>
+
+  <!-- Agent Mail -->
+  <h4>Agent Mail</h4>
+  <% if (rig.mail.length === 0) { %>
+    <p class="empty-state">No messages</p>
+  <% } else { %>
+    <% rig.mail.forEach(agentMail => { %>
+      <h5 style="margin-top: 1rem; margin-bottom: 0.5rem;">
+        <% if (agentMail.agentType === 'witness') { %>
+          <span style="color: #4a9eff;">Witness</span>
+        <% } else { %>
+          <span style="color: #00aa00;"><%= agentMail.agent %></span>
+        <% } %>
+        Mail (<%= agentMail.messages.length %>)
+      </h5>
+      <table>
+        <thead>
+          <tr>
+            <th>From</th>
+            <th>Subject</th>
+            <th>Type</th>
+            <th>Activity</th>
+          </tr>
+        </thead>
+        <tbody>
+          <% agentMail.messages.slice(0, 10).forEach(msg => { %>
+            <tr class="<%= msg.read ? '' : 'mq-yellow' %>">
+              <td><%= msg.from %></td>
+              <td>
+                <% if (!msg.read) { %><strong><% } %>
+                <%= msg.subject %>
+                <% if (!msg.read) { %></strong><% } %>
+                <% if (msg.priority === 'urgent' || msg.priority === 'high') { %>
+                  <span style="color: #ff4444;"> !</span>
+                <% } %>
+              </td>
+              <td><code><%= msg.type %></code></td>
+              <td>
+                <span class="activity-dot activity-<%= msg.lastActivity.color %>"></span>
+                <%= msg.lastActivity.text %>
+              </td>
+            </tr>
+          <% }); %>
+        </tbody>
+      </table>
+      <% if (agentMail.messages.length > 10) { %>
+        <p class="empty-state">Showing 10 of <%= agentMail.messages.length %> messages</p>
+      <% } %>
+    <% }); %>
+  <% } %>
+
+  <!-- Peek Output -->
+  <h4>Recent Output</h4>
+  <% if (rig.peek.length === 0) { %>
+    <p class="empty-state">No active sessions to peek</p>
+  <% } else { %>
+    <% rig.peek.forEach(p => { %>
+      <details style="margin-bottom: 1rem;">
+        <summary style="cursor: pointer; color: #4a9eff;">
+          <%= p.worker %> (<%= p.workerType %>)
+        </summary>
+        <pre style="background-color: var(--code-bg); padding: 1rem; border-radius: 4px; overflow-x: auto; font-size: 0.85em; margin-top: 0.5rem;"><%= p.output || '(no output)' %></pre>
+      </details>
+    <% }); %>
+  <% } %>
+
+  <!-- Rig Beads -->
+  <h4>Rig Beads</h4>
+  <% if (rig.beads.length === 0) { %>
+    <p class="empty-state">No rig-level beads</p>
+  <% } else { %>
+    <table>
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Title</th>
+          <th>Status</th>
+          <th>Type</th>
+        </tr>
+      </thead>
+      <tbody>
+        <% rig.beads.slice(0, 15).forEach(bead => { %>
+          <tr>
+            <td><code><%= bead.id %></code></td>
+            <td><%= bead.title %></td>
+            <td>
+              <%
+                let statusClass = '';
+                if (bead.status === 'closed') statusClass = 'complete';
+                else if (bead.status === 'in_progress') statusClass = 'active';
+                else if (bead.status === 'open') statusClass = 'waiting';
+              %>
+              <span class="work-status <%= statusClass %>"><%= bead.status %></span>
+            </td>
+            <td><code><%= bead.issueType %></code></td>
+          </tr>
+        <% }); %>
+      </tbody>
+    </table>
+    <% if (rig.beads.length > 15) { %>
+      <p class="empty-state">Showing 15 of <%= rig.beads.length %> beads</p>
+    <% } %>
+  <% } %>
+</div>

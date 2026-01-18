@@ -196,6 +196,19 @@
       background-color: var(--table-hover);
     }
 
+    tr.clickable {
+      cursor: pointer;
+    }
+
+    tr.clickable:hover {
+      background-color: rgba(74, 158, 255, 0.2);
+    }
+
+    tr.selected {
+      background-color: rgba(74, 158, 255, 0.3);
+      border-left: 3px solid #4a9eff;
+    }
+
     h1 {
       color: #4a9eff;
       margin-bottom: 2rem;
@@ -207,6 +220,21 @@
       margin-top: 3rem;
       margin-bottom: 1rem;
       font-size: 24px;
+    }
+
+    h3 {
+      color: #4a9eff;
+      margin-top: 2rem;
+      margin-bottom: 1rem;
+      font-size: 20px;
+    }
+
+    h4 {
+      color: var(--text-color);
+      margin-top: 1.5rem;
+      margin-bottom: 0.75rem;
+      font-size: 16px;
+      opacity: 0.9;
     }
 
     a {
@@ -232,69 +260,77 @@
       padding: 1rem 0;
     }
 
-    /* Theme switcher styles */
-    .theme-switcher {
-      position: fixed;
-      top: 2rem;
-      right: 2rem;
-      display: flex;
-      gap: 0.5rem;
-      background-color: var(--bg-secondary);
-      padding: 0.5rem;
-      border-radius: 8px;
-      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
-      transition: background-color 0.3s ease;
-      z-index: 1000;
-    }
-
-    .theme-btn {
-      background: transparent;
-      border: 2px solid transparent;
-      color: var(--text-color);
-      padding: 0.5rem 1rem;
-      border-radius: 6px;
+    /* Theme toggle icon */
+    .theme-toggle {
+      width: 16px;
+      height: 16px;
       cursor: pointer;
-      font-family: 'Courier New', monospace;
-      font-size: 14px;
-      transition: all 0.2s ease;
+      opacity: 0.6;
+      transition: opacity 0.2s ease;
+      flex-shrink: 0;
     }
 
-    .theme-btn:hover {
-      background-color: rgba(74, 158, 255, 0.2);
-      border-color: #4a9eff;
+    .theme-toggle:hover {
+      opacity: 1;
     }
 
-    .theme-btn.active {
-      background-color: #4a9eff;
-      color: #fff;
-      border-color: #4a9eff;
-    }
-
-    .header-wrapper {
+    .header-row {
       display: flex;
       justify-content: space-between;
       align-items: center;
       margin-bottom: 2rem;
     }
 
-    .header-wrapper h1 {
+    .header-row h1 {
       margin: 0;
+    }
+
+    /* Rig details panel */
+    #rig-details {
+      margin-top: 1rem;
+      padding: 1rem;
+      background-color: var(--bg-secondary);
+      border-radius: 8px;
+      border-left: 3px solid #4a9eff;
+    }
+
+    #rig-details:empty {
+      display: none;
+    }
+
+    .rig-details h3 {
+      margin-top: 0;
+    }
+
+    .rig-details h4 {
+      border-bottom: 1px solid var(--table-border);
+      padding-bottom: 0.5rem;
+    }
+
+    details summary {
+      padding: 0.5rem;
+      background-color: var(--table-header-bg);
+      border-radius: 4px;
+    }
+
+    details summary:hover {
+      background-color: var(--table-hover);
     }
   </style>
 </head>
 <body>
-  <!-- Theme Switcher -->
-  <div class="theme-switcher">
-    <button class="theme-btn" data-theme="light" title="Light Mode">☀️ Light</button>
-    <button class="theme-btn" data-theme="dark" title="Dark Mode">🌙 Dark</button>
-    <button class="theme-btn active" data-theme="system" title="System Theme">💻 System</button>
-  </div>
-
-  <div class="container" hx-get="/" hx-trigger="every 10s" hx-swap="innerHTML">
-    <h1>🚂 Gas Town Dashboard</h1>
+  <div class="container">
+    <div class="header-row">
+      <h1>Gas Town Dashboard</h1>
+      <span id="theme-toggle" class="theme-toggle" title="System theme (click to change)">
+        <svg viewBox="0 0 24 24" fill="currentColor" style="width:100%;height:100%">
+          <path id="theme-icon" d="M12 3a9 9 0 109 9c0-.46-.04-.92-.1-1.36a5.389 5.389 0 01-4.4 2.26 5.403 5.403 0 01-3.14-9.8c-.44-.06-.9-.1-1.36-.1z"/>
+        </svg>
+      </span>
+    </div>
 
     <!-- Convoys Section -->
-    <h2>🎯 Convoys</h2>
+    <h2>Convoys</h2>
     <% if (convoys.length === 0) { %>
       <p class="empty-state">No open convoys</p>
     <% } else { %>
@@ -337,7 +373,7 @@
     <% } %>
 
     <!-- Merge Queue Section -->
-    <h2>📋 Merge Queue</h2>
+    <h2>Merge Queue</h2>
     <% if (mergeQueue.length === 0) { %>
       <p class="empty-state">No open pull requests</p>
     <% } else { %>
@@ -365,90 +401,128 @@
       </table>
     <% } %>
 
-    <!-- Polecat Workers Section -->
-    <h2>🐱 Polecat Workers</h2>
-    <% if (polecats.length === 0) { %>
-      <p class="empty-state">No active workers</p>
+    <!-- Town Beads Section -->
+    <h2>Town Beads</h2>
+    <% if (townBeads.length === 0) { %>
+      <p class="empty-state">No town-level beads</p>
     <% } else { %>
       <table>
         <thead>
           <tr>
-            <th>Worker</th>
-            <th>Rig</th>
-            <th>Session</th>
-            <th>Activity</th>
+            <th>ID</th>
+            <th>Title</th>
             <th>Status</th>
+            <th>Type</th>
           </tr>
         </thead>
         <tbody>
-          <% polecats.forEach(polecat => { %>
+          <% townBeads.slice(0, 15).forEach(bead => { %>
             <tr>
-              <td><%= polecat.name %></td>
-              <td><%= polecat.rig %></td>
-              <td><code><%= polecat.sessionId %></code></td>
+              <td><code><%= bead.id %></code></td>
+              <td><%= bead.title %></td>
               <td>
-                <span class="activity-dot activity-<%= polecat.lastActivity.color %>"></span>
-                <%= polecat.lastActivity.text %>
+                <%
+                  let statusClass = '';
+                  if (bead.status === 'closed') statusClass = 'complete';
+                  else if (bead.status === 'in_progress') statusClass = 'active';
+                  else if (bead.status === 'open') statusClass = 'waiting';
+                %>
+                <span class="work-status <%= statusClass %>"><%= bead.status %></span>
               </td>
-              <td style="color: #888; font-size: 0.9em;"><%= polecat.statusHint %></td>
+              <td><code><%= bead.issueType %></code></td>
             </tr>
           <% }); %>
         </tbody>
       </table>
+      <% if (townBeads.length > 15) { %>
+        <p class="empty-state">Showing 15 of <%= townBeads.length %> beads</p>
+      <% } %>
+    <% } %>
+
+    <!-- Rigs Section -->
+    <h2>Rigs</h2>
+    <% if (rigs.length === 0) { %>
+      <p class="empty-state">No rigs configured</p>
+    <% } else { %>
+      <table>
+        <thead>
+          <tr>
+            <th>Rig</th>
+            <th>Polecats</th>
+            <th>Crew</th>
+            <th>Agents</th>
+          </tr>
+        </thead>
+        <tbody>
+          <% rigs.forEach(rig => { %>
+            <tr class="clickable"
+                hx-get="/rig/<%= rig.name %>"
+                hx-target="#rig-details"
+                hx-swap="innerHTML"
+                onclick="selectRig(this)">
+              <td><%= rig.name %></td>
+              <td><%= rig.polecatCount %></td>
+              <td><%= rig.crewCount %></td>
+              <td>
+                <% if (rig.agents.length > 0) { %>
+                  <%= rig.agents.join(', ') %>
+                <% } else { %>
+                  <span style="color: var(--empty-state-color);">none</span>
+                <% } %>
+              </td>
+            </tr>
+          <% }); %>
+        </tbody>
+      </table>
+
+      <!-- Rig Details Panel (populated via HTMX) -->
+      <div id="rig-details"></div>
     <% } %>
   </div>
 
   <script>
-    // Theme switcher functionality
+    // Theme toggle functionality
     (function() {
       const THEME_KEY = 'gastown-dashboard-theme';
+      const THEMES = ['light', 'dark', 'system'];
+      const ICONS = {
+        light: 'M12 7c-2.76 0-5 2.24-5 5s2.24 5 5 5 5-2.24 5-5-2.24-5-5-5zM2 13h2c.55 0 1-.45 1-1s-.45-1-1-1H2c-.55 0-1 .45-1 1s.45 1 1 1zm18 0h2c.55 0 1-.45 1-1s-.45-1-1-1h-2c-.55 0-1 .45-1 1s.45 1 1 1zM11 2v2c0 .55.45 1 1 1s1-.45 1-1V2c0-.55-.45-1-1-1s-1 .45-1 1zm0 18v2c0 .55.45 1 1 1s1-.45 1-1v-2c0-.55-.45-1-1-1s-1 .45-1 1zM5.99 4.58a.996.996 0 00-1.41 0 .996.996 0 000 1.41l1.06 1.06c.39.39 1.03.39 1.41 0s.39-1.03 0-1.41L5.99 4.58zm12.37 12.37a.996.996 0 00-1.41 0 .996.996 0 000 1.41l1.06 1.06c.39.39 1.03.39 1.41 0a.996.996 0 000-1.41l-1.06-1.06zm1.06-10.96a.996.996 0 000-1.41.996.996 0 00-1.41 0l-1.06 1.06c-.39.39-.39 1.03 0 1.41s1.03.39 1.41 0l1.06-1.06zM7.05 18.36a.996.996 0 000-1.41.996.996 0 00-1.41 0l-1.06 1.06c-.39.39-.39 1.03 0 1.41s1.03.39 1.41 0l1.06-1.06z',
+        dark: 'M12 3a9 9 0 109 9c0-.46-.04-.92-.1-1.36a5.389 5.389 0 01-4.4 2.26 5.403 5.403 0 01-3.14-9.8c-.44-.06-.9-.1-1.36-.1z',
+        system: 'M20 3H4c-1.1 0-2 .9-2 2v11c0 1.1.9 2 2 2h3l-1 1v2h12v-2l-1-1h3c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 13H4V5h16v11z'
+      };
       const html = document.documentElement;
-      const themeButtons = document.querySelectorAll('.theme-btn');
+      const toggle = document.getElementById('theme-toggle');
+      const icon = document.getElementById('theme-icon');
 
-      // Load saved theme or default to 'system'
-      function loadTheme() {
-        const savedTheme = localStorage.getItem(THEME_KEY) || 'system';
-        setTheme(savedTheme);
+      function getTheme() {
+        return localStorage.getItem(THEME_KEY) || 'system';
       }
 
-      // Set theme and update UI
       function setTheme(theme) {
         html.setAttribute('data-theme', theme);
         localStorage.setItem(THEME_KEY, theme);
-
-        // Update button states
-        themeButtons.forEach(btn => {
-          if (btn.dataset.theme === theme) {
-            btn.classList.add('active');
-          } else {
-            btn.classList.remove('active');
-          }
-        });
+        icon.setAttribute('d', ICONS[theme]);
+        toggle.title = theme.charAt(0).toUpperCase() + theme.slice(1) + ' theme (click to change)';
       }
 
-      // Add click handlers to theme buttons
-      themeButtons.forEach(btn => {
-        btn.addEventListener('click', () => {
-          setTheme(btn.dataset.theme);
-        });
-      });
-
-      // Initialize theme on load
-      loadTheme();
-
-      // Listen for system theme changes when in system mode
-      if (window.matchMedia) {
-        const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
-        mediaQuery.addEventListener('change', () => {
-          const currentTheme = localStorage.getItem(THEME_KEY);
-          if (currentTheme === 'system') {
-            // Force a repaint by toggling the attribute
-            const theme = html.getAttribute('data-theme');
-            html.setAttribute('data-theme', theme);
-          }
-        });
+      function cycleTheme() {
+        const current = getTheme();
+        const idx = THEMES.indexOf(current);
+        const next = THEMES[(idx + 1) % THEMES.length];
+        setTheme(next);
       }
+
+      toggle.addEventListener('click', cycleTheme);
+      setTheme(getTheme());
     })();
+
+    // Rig selection functionality
+    function selectRig(row) {
+      // Remove selected class from all rig rows
+      document.querySelectorAll('tr.clickable').forEach(r => r.classList.remove('selected'));
+      // Add selected class to clicked row
+      row.classList.add('selected');
+    }
   </script>
 </body>
 </html>

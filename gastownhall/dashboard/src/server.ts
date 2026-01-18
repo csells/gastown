@@ -43,6 +43,9 @@ export class DashboardServer {
     // Dashboard route
     this.app.get('/', (req, res) => this.controller.renderDashboard(req, res));
 
+    // Rig details route (for HTMX)
+    this.app.get('/rig/:name', (req, res) => this.controller.renderRigDetails(req, res));
+
     // Health check
     this.app.get('/health', (_req, res) => {
       res.json({ status: 'ok' });
