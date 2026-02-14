@@ -1,0 +1,124 @@
+{
+  "version": 4,
+  "project": {
+    "name": "gas-city-sdk",
+    "repos": [
+      "https://github.com/steveyegge/gastown"
+    ],
+    "tech_stack": "",
+    "goals": ""
+  },
+  "created_at": "2026-02-14T06:19:18.275609+00:00",
+  "updated_at": "2026-02-14T13:28:46.595055+00:00",
+  "current_stage": "planning",
+  "stages": {
+    "research": {
+      "status": "completed",
+      "started_at": "2026-02-14T06:19:21.884597+00:00",
+      "completed_at": "2026-02-14T13:25:24.241321+00:00",
+      "duration_seconds": 25562,
+      "artifacts": [],
+      "gate_result": {
+        "gate": "G1",
+        "passed": true,
+        "checked_at": "2026-02-14T13:25:28.625338+00:00",
+        "observations": [
+          {
+            "gate": "G1",
+            "gate_slug": "research_quality",
+            "check": "line_count",
+            "threshold": null,
+            "actual": 656,
+            "margin": null,
+            "passed": true
+          },
+          {
+            "gate": "G1",
+            "gate_slug": "research_quality",
+            "check": "source_citations",
+            "threshold": 3,
+            "actual": 50,
+            "margin": 15.666666666666666,
+            "passed": true
+          }
+        ]
+      }
+    },
+    "ideation": {
+      "status": "completed",
+      "started_at": "2026-02-14T13:25:28.625616+00:00",
+      "completed_at": "2026-02-14T13:28:42.270420+00:00",
+      "duration_seconds": 193,
+      "artifacts": [],
+      "gate_result": {
+        "gate": "G2",
+        "passed": true,
+        "checked_at": "2026-02-14T13:28:46.594764+00:00",
+        "observations": [
+          {
+            "gate": "G2",
+            "gate_slug": "ideation_quality",
+            "check": "idea_count",
+            "threshold": 15,
+            "actual": 27,
+            "margin": 0.8,
+            "passed": true
+          }
+        ]
+      }
+    },
+    "planning": {
+      "status": "in_progress",
+      "started_at": "2026-02-14T13:28:46.595051+00:00",
+      "completed_at": null,
+      "duration_seconds": null,
+      "artifacts": [],
+      "gate_result": null,
+      "rounds": [],
+      "hardened_at": null,
+      "pre_hardening_lines": null,
+      "post_hardening_lines": null,
+      "hardening_after_round": null
+    },
+    "operationalization": {
+      "status": "pending",
+      "started_at": null,
+      "completed_at": null,
+      "duration_seconds": null,
+      "artifacts": [],
+      "gate_result": null
+    },
+    "decomposition": {
+      "status": "pending",
+      "started_at": null,
+      "completed_at": null,
+      "duration_seconds": null,
+      "artifacts": [],
+      "gate_result": null,
+      "refinement_rounds": []
+    },
+    "execution": {
+      "status": "pending",
+      "started_at": null,
+      "completed_at": null,
+      "duration_seconds": null,
+      "artifacts": [],
+      "gate_result": null,
+      "swarm_config": null,
+      "spec_deltas": [],
+      "sessions": []
+    },
+    "review": {
+      "status": "pending",
+      "started_at": null,
+      "completed_at": null,
+      "duration_seconds": null,
+      "artifacts": [],
+      "gate_result": null,
+      "audit_domains": [],
+      "spec_alignment": {},
+      "calibration_snapshot": {}
+    }
+  },
+  "overrides": []
+}
