@@ -1,9 +1,9 @@
 # Gas City SDK — Technical Specification
 
-> **Version:** 0.9.0
+> **Version:** 0.11.0
 > **Date:** 2026-02-15
 > **Status:** Planning (grounded in Gas Town source exploration)
-> **Predecessor:** v0.8.0 (Codex audit: hardcoded role elimination, controller/CLI contract, runtime error model, pinned status data model, addressing consistency, config precedence, plugin execution, event bus backpressure, health restart backoff)
+> **Predecessor:** v0.10.0 (multi-model review fixes: substrate table corrections, SandboxProvider handle struct, event schema/locking/security, scoped persistence invariant)
 
 ---
 
@@ -48,6 +48,86 @@ These are examples, not defaults. `gc init --file ralph.toml` copies an example 
 - Agent marketplace / sharing
 - Automatic prompt engineering
 - Cost management (responsibility of the underlying runtime)
+
+### 1.1 Substrate Layering Principle
+
+**Vision requirement:** "GC builds up higher level concepts on lower level concepts, e.g. the mail system is built on top of the beads system. The core principles are clearly visible and intrinsic whereas the higher level concepts are built up with configuration."
+
+Gas City's subsystems form a strict dependency hierarchy. Each layer builds exclusively on the layers below it. No layer bypasses a lower layer to access its substrate directly. This makes each layer independently testable, replaceable, and comprehensible.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ Layer 5: CONTROLLER (§7)                                    │
+│   Workspace daemon — orchestrates all layers below           │
+│   Depends on: everything                                     │
+├─────────────────────────────────────────────────────────────┤
+│ Layer 4: DISPATCH & COORDINATION                             │
+│   Sling (§14) ─── Convoy (§13) ─── Health/Patrol (§9)      │
+│   Depends on: formulas, molecules, beads, mail, pool,       │
+│   event bus, agent registry, nudge                           │
+├─────────────────────────────────────────────────────────────┤
+│ Layer 3: WORKFLOW ENGINE                                     │
+│   Formulas (§11) ─── Molecules (§12) ─── Plugins (§16)     │
+│   Depends on: beads (molecules are beads), event bus         │
+│   (plugin triggers), agent pool (execution targets)          │
+├─────────────────────────────────────────────────────────────┤
+│ Layer 2: MESSAGING & INTERACTION                             │
+│   Mail (§15.1) ─── Nudge (§15.1) ─── Channels (§15.6)     │
+│   Lifecycle Events (§19)                                     │
+│   Mail depends on: beads (messages stored as beads)          │
+│   Nudge depends on: tmux, agent registry                     │
+│   Lifecycle depends on: event bus                            │
+├─────────────────────────────────────────────────────────────┤
+│ Layer 1: TASK SYSTEM & AGENTS                                │
+│   Beads/TaskBackend (§10) ─── Agent Registry (§18.3)        │
+│   Pool Manager (§2.7) ─── Name Pool                         │
+│   Depends on: agent protocol, session management             │
+├─────────────────────────────────────────────────────────────┤
+│ Layer 0: INFRASTRUCTURE (no Gas City dependencies)           │
+│   Agent Protocol (§2) ─── Event Bus (§8) ─── Config (§3)   │
+│   Session/tmux ─── Sandbox/Isolation                        │
+│   These are self-contained: pure interfaces, pure I/O,       │
+│   or pure parsing with no upward dependencies.               │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Detailed substrate relationships:**
+
+| Subsystem | Layer | Builds On | Provides To |
+|-----------|-------|-----------|-------------|
+| **Agent Protocol** (`AgentProvider`) | 0 | Nothing — pure interface | Everything that touches agents |
+| **Event Bus** | 0 | Nothing — JSONL append + tiered subscribers (§8.2/§8.3) | Lifecycle events, health, plugins, dashboard |
+| **Config Parser** | 0 | Nothing — pure TOML parsing | Everything (config is universal input) |
+| **Session/tmux** | 0 | Nothing — OS-level tmux management | Agent protocol (tmux provider), nudge |
+| **Sandbox/Isolation** | 0 | Nothing — worktree/directory creation | Agent protocol (workspace setup) |
+| **Beads** (`TaskBackend`) | 1 | Config (data_dir), event bus (change notifications) | Mail, formulas, molecules, convoys, plugins (wisps), sling, agent registry (identity beads) |
+| **Agent Registry** | 1 | Agent protocol (handle persistence) | Pool manager, health patrol, sling, nudge |
+| **Pool Manager** | 1 | Agent protocol, name pool | Sling (auto-spawn), health (scale-down) |
+| **Mail** | 2 | Beads (messages stored as mail-type beads) | Sling (notifications), health (alerts), agents (inbox) |
+| **Nudge** | 2 | Tmux (`send-keys`), agent registry (session lookup) | Sling (wake agents), health (restart notification) |
+| **Channels** | 2 | Nudge (delivery), config (member lists) | Broadcast, group nudge |
+| **Lifecycle Events** | 2 | Event bus (subscribe to events), shell (`sh -c`) | Health alerting, custom integrations |
+| **Formula Parser** | 3 | Nothing (pure TOML parsing) | Molecules (instantiation template) |
+| **Molecules** | 3 | Beads (root bead + step children), formula parser | Sling (work units), agents (DAG execution) |
+| **Plugins** | 3 | Event bus (gate triggers), beads (wisps), agent pool (execution) | Automated maintenance, custom actions |
+| **Sling** | 4 | Formulas, molecules, beads, mail, nudge, pool manager, convoy | Agents (unified work dispatch) |
+| **Convoy** | 4 | Beads (tracking via `Tracks` dependencies), molecules (legs) | Progress tracking, stranded detection |
+| **Health/Patrol** | 4 | Agent registry, event bus, beads (stale hooks), nudge (restart) | Agent reliability, stall recovery |
+| **Controller/Daemon** | 5 | All of the above | Workspace lifecycle, websocket transparency |
+
+**Layering invariants:**
+
+1. **No upward dependencies.** Layer N never imports or calls Layer N+1. The event bus (Layer 0) has no knowledge of health monitoring (Layer 4). Beads (Layer 1) has no knowledge of formulas (Layer 3).
+
+2. **Beads is the universal persistence substrate for domain state.** Mail messages, molecule steps, convoy tracking, plugin wisps, agent identities — all are beads. This means a single storage engine (Dolt or filesystem) serves domain state for the entire system. Swapping backends (e.g., `beads` → `filesystem`) swaps domain persistence for everything at once. **Exceptions (operational/runtime state, not beads):** agent registry handles (`.gc/agents/*.json`), durable event log (`.gc/events.jsonl`), config pointer (`.gc/config.toml`), sequence counter (`.gc/events.seq`). These are infrastructure artifacts managed by their respective subsystems.
+
+3. **Event bus is the universal observation substrate.** Every layer publishes events. No layer consumes events from a higher layer. The event bus is how transparency (§7.4) works — the websocket streams events from all layers without any layer needing to know about the websocket.
+
+4. **Config is the universal activation mechanism.** Each layer activates based on config sections present (§4). If `[messaging]` is absent, Layer 2 messaging subsystems don't initialize. If `[formulas]` is absent, Layer 3 formula engine doesn't initialize. The controller (Layer 5) inspects config to determine which layers to start.
+
+5. **The progressive capability model (§4) generally follows the layering.** Capabilities activate bottom-up: Level 0-1 activates Layers 0-1, Level 2-4 activates Layers 1-2, Level 5 activates Layer 3, Level 6 activates Layer 4 (health/patrol requires the daemon), Level 7 activates Layer 3 plugins, Level 8 spans Layers 4-5. The strict bottom-up rule has one exception: health monitoring (Level 6) reaches into Layer 4 because the patrol loop requires the daemon (Layer 5). Users still build up from the bottom — you can't configure formulas (Layer 3) without having beads (Layer 1) active.
+
+**Why this matters for extensibility:** To add a new subsystem (e.g., a cost tracker), you identify its layer, declare its dependencies, and wire it into the event bus. The subsystem reads config to activate, uses beads for persistence, and publishes events for transparency. No existing subsystem needs modification.
 
 ---
 
@@ -111,7 +191,72 @@ type FileAttachment struct {
 type Adopter interface {
     Adopt(ctx context.Context, identity AgentIdentity, metadata map[string]string) (AgentHandle, error)
 }
+
+// SandboxProvider is the interface for agent workspace isolation.
+// Decouples orchestration from the isolation mechanism (worktree, directory, Docker, etc.).
+// Vision requirement: "wiring in sandboxes, plugins, and hooks (explicit extensibility)"
+type SandboxProvider interface {
+    // Name returns the sandbox type (e.g., "worktree", "directory", "docker")
+    Name() string
+
+    // Create sets up an isolated workspace for an agent.
+    // Returns a Sandbox handle (not just a path) — the handle carries the metadata
+    // needed by Destroy/Exists/Sync and by callers who need container IDs, branch
+    // names, or "where to run commands" for non-filesystem sandboxes (Docker, remote).
+    Create(ctx context.Context, config SandboxConfig) (Sandbox, error)
+
+    // Destroy tears down the isolated workspace.
+    // For worktrees: git worktree remove. For directories: rm -rf. For Docker: container rm.
+    // Idempotent: returns nil if sandbox already destroyed.
+    // DestroyOpts.Force bypasses safety checks (e.g., uncommitted changes in worktrees).
+    Destroy(ctx context.Context, sandbox Sandbox, opts DestroyOpts) error
+
+    // Exists checks if the sandbox workspace still exists.
+    Exists(sandbox Sandbox) bool
+
+    // Sync pulls latest changes into the sandbox (e.g., git pull in worktree).
+    Sync(ctx context.Context, sandbox Sandbox) error
+}
+
+// Sandbox is the handle returned by Create — it carries everything needed to
+// interact with the isolated workspace. This is a struct (not just a path)
+// so that Docker/remote providers can carry container IDs, volume mounts, etc.
+type Sandbox struct {
+    WorkDir    string            // Absolute filesystem path (primary for worktree/directory)
+    Kind       string            // Provider type that created this ("worktree", "directory", "docker")
+    Branch     string            // Git branch name (worktree only; empty otherwise)
+    Metadata   map[string]string // Provider-specific: container ID, volume, remote host, etc.
+    BeadsDir   string            // Resolved beads storage path (see "Beads in sandboxes" below)
+}
+
+type SandboxConfig struct {
+    Project    string // Project name
+    AgentName  string // Agent name (for branch naming)
+    BaseBranch string // Base branch to branch from (default: "main")
+    BaseDir    string // Parent directory for the sandbox
+}
+
+type DestroyOpts struct {
+    Force bool // Bypass safety checks (e.g., uncommitted changes in worktrees)
+}
 ```
+
+**Built-in sandbox providers:**
+
+| Provider | Isolation | Lifecycle | Use Case |
+|----------|-----------|-----------|----------|
+| `worktree` (default) | Git worktree on unique branch | `git worktree add` / `git worktree remove` | Ephemeral agents (polecats) — full git isolation |
+| `directory` | Copy of working tree | `cp -r` / `rm -rf` | Non-git projects or quick isolation |
+| `none` | Shared workspace | No-op create/destroy | Persistent agents (crew, mayor) working on main |
+
+Docker and remote container providers are future implementations — the `Sandbox` handle struct accommodates them without interface changes (Docker carries container ID and volume mounts in `Metadata`). The `AgentConfig.Isolation` field (§3.2) selects which `SandboxProvider` to use.
+
+**Beads storage in sandboxes:** Sandboxes must locate the shared beads storage without duplicating the task database. The resolution order:
+1. If `GC_BEADS_DIR` env var is set, use that path (providers inject this into agent sessions).
+2. If `.beads/redirect` exists in the sandbox `WorkDir`, follow the redirect to the shared store (Gas Town pattern: worktrees contain a redirect file pointing to the main repo's `.beads/`).
+3. Otherwise, use `{WorkDir}/.beads/` (in-sandbox storage, appropriate for `directory` and `none` providers).
+
+The `Sandbox.BeadsDir` field is resolved at `Create` time and passed to agents via `GC_BEADS_DIR`. This ensures worktree sandboxes share the main repo's beads store while directory-copy sandboxes get their own snapshot.
 
 ### 2.3 Core Data Structures
 
@@ -959,14 +1104,48 @@ const (
 ### 8.2 Tiered Subscriber Model
 
 The event bus has two tiers:
-- **Critical subscribers** (supervisor, structured logger, lifecycle executor): Delivered via bounded queues (capacity: 1000 events per subscriber). If a critical subscriber falls behind, excess events are written to an overflow log (`.gc/events-overflow.jsonl`) and the subscriber receives a gap notification on next read.
+- **Critical subscribers** (supervisor, structured logger, lifecycle executor): Delivered via bounded queues (capacity: 1000 events per subscriber). If a critical subscriber falls behind, excess events are written to a per-subscriber overflow log (`.gc/events-overflow-{subscriber}.jsonl`) recording delivery failures (event seq + timestamp + error reason). The overflow log is distinct from the durable event log: the durable log records *all published events*; overflow logs record *delivery failures for a specific subscriber*. The subscriber receives a gap notification on next read.
 - **Optional subscribers** (websocket streamer, CLI feed, metrics): Fire-and-forget via unbounded channel. Slow consumers may miss events but never stall the bus.
 
 **Backpressure protection:** Critical subscribers have a per-event timeout (default: 5s). If a subscriber (e.g., lifecycle executor running a shell command) exceeds the timeout, the event is queued and processing continues. This prevents lifecycle handlers from stalling the entire event bus. Lifecycle handlers that need long execution should spawn background processes.
 
-A ring buffer (10k events) provides catch-up replay when new subscribers connect (e.g., websocket clients joining late).
+A ring buffer (10k events) provides **in-memory** catch-up replay when new subscribers connect (e.g., websocket clients joining late).
 
-**Sequence monotonicity:** Events have monotonically increasing sequence numbers, enabling clients to detect gaps and request replay.
+### 8.3 Durable Event Log
+
+In addition to the in-memory ring buffer, all events are appended to `.gc/events.jsonl` (one JSON object per line). This satisfies the vision requirement for "historical data" — events survive controller restarts and can be queried for post-mortem analysis.
+
+**Event schema:** Every event is a JSON object with the following fields:
+
+```go
+type Event struct {
+    Seq       uint64                 // Monotonically increasing sequence number
+    Type      string                 // Event type (e.g., "bead.hooked", "agent.started")
+    Timestamp time.Time              // Wall-clock time of publication
+    Actor     string                 // Agent or subsystem that caused the event
+    Payload   map[string]interface{} // Event-type-specific data
+    Visibility string               // "internal" (system events) or "external" (user-visible)
+}
+```
+
+The same `Event` struct is used for the JSONL durable log, the websocket stream, and the in-memory ring buffer. Fields are required except `Visibility` (defaults to `"external"`).
+
+**Event log management:**
+- **Location:** `.gc/events.jsonl`
+- **Rotation:** When the log exceeds 50MB, it is rotated to `.gc/events.jsonl.1` (max 3 rotated files, ~200MB total cap)
+- **Format:** JSON-lines, one event per line: `{"seq": 1, "type": "bead.hooked", "timestamp": "...", "actor": "gastown/main/polecat-Toast", "payload": {...}}`
+- **Replay:** Websocket clients send `{"replay_from": <seq>}` on connect. The server reads from the durable log for events older than the ring buffer, then switches to live streaming. If `replay_from` requests a seq older than the oldest retained rotated file, the server returns `{"error": "seq_expired", "oldest_available": <seq>}` and begins streaming from the oldest available event.
+
+**Sequence monotonicity:** Events have monotonically increasing sequence numbers, persisted in `.gc/events.seq` (single integer, atomically written). Clients detect gaps by comparing received sequence numbers and request replay.
+
+**Cross-process writer safety:** When the controller is running, it is the sole writer to `.gc/events.jsonl` and `.gc/events.seq` (events from CLI fallback commands are forwarded via the Unix socket per §7.5). When the controller is *not* running, CLI commands may write events directly. In this fallback mode:
+- `.gc/events.jsonl` is protected by `flock` (advisory file lock) — the same mechanism Gas Town uses (`internal/events/events.go`).
+- `.gc/events.seq` is atomically updated: read current seq → increment → write to `.gc/events.seq.tmp` → `rename()` over `.gc/events.seq`. The `flock` on the JSONL file serializes this read-modify-write cycle across processes.
+
+**Security and retention:**
+- **Permissions:** `.gc/events.jsonl` is created with mode `0600` (owner-only read/write). Rotated files inherit the same permissions.
+- **Sensitive content:** Events may include agent prompt/output summaries (per §7.4 and §20A). The durable log follows the same redaction stance as websocket streaming (§20A.2): output is logged but secrets are never included in event payloads. Operators who need full prompt/output history should use provider-specific session logs, not the event log.
+- **Retention:** The 3-file rotation cap (~200MB) provides natural retention. For stricter requirements, operators can configure external log rotation (e.g., `logrotate`) on `.gc/events.jsonl`. A future `[events.retention]` config section may add TTL-based pruning per event type.
 
 ---
 
@@ -2222,7 +2401,7 @@ ready(s) ⟺ ∀di ∈ D: status(di) = closed
 
 2. **Plugin system scope.** The plan includes plugins with gate types. Gas Town's plugin system may still be evolving. Confirm scope and gate type implementations before Phase 5.
 
-3. **Websocket protocol.** Define the exact message format for websocket streaming (JSON-lines? Protobuf?). JSON-lines is simplest and matches Gas Town's existing JSONL patterns. Also define the replay request protocol — how does a client request replay from a specific sequence ID after a disconnect? Consider promoting to a required spec item before Phase 5 (Codex audit recommendation).
+3. ~~**Websocket protocol.**~~ Resolved: JSON-lines format with `{"replay_from": <seq>}` handshake. Durable event log at `.gc/events.jsonl` with rotation. See §8.2/§8.3.
 
 4. ~~**Formula preset system.**~~ Resolved: presets are v1. Added to convoy schema (§11.2) as preconfigured leg selections.
 
@@ -2236,7 +2415,7 @@ ready(s) ⟺ ∀di ∈ D: status(di) = closed
 
 9. **Secret management in formulas.** Formula `[inputs]` values end up in bead metadata (Dolt). §20A.2 says secrets must not appear in bead metadata. Define a mechanism for environment-based secret injection that avoids persistence (e.g., `type = "secret"` inputs resolved from env vars at execution time, never stored).
 
-10. **Event durability.** The ring buffer (§8.2) provides in-memory replay but events are lost across controller restarts. Consider a durable event log (`.gc/events.jsonl` with rotation) for post-mortem analysis and historical transparency. This is important for the vision requirement of "historical data."
+10. ~~**Event durability.**~~ Resolved: durable event log at `.gc/events.jsonl` with 50MB rotation, 3-file cap. Event struct defined. See §8.3.
 
 11. **Provider capability negotiation.** `Prompt.Images` and `Prompt.Files` exist (§2.2) but most CLI providers are text-only. Define capability flags or optional interfaces (`SupportsImages() bool`, `SupportsFiles() bool`) and required fallback behavior (error vs transform-to-text vs drop-with-warning).
 
@@ -2256,10 +2435,11 @@ ready(s) ⟺ ∀di ∈ D: status(di) = closed
 | Reasonable defaults | §3.3 Defaults table | Every setting has default |
 | Full configurability surface | §6 Role System | TOML + templates + override resolution |
 | Roles external, not hardcoded | §6.1 Three-Part Role Stack, §14.3, §15.4 | ZERO hardcoded roles; sling/nudge resolve against config |
-| Sandboxes, plugins, lifecycle events | §16 Plugins, §19 Lifecycle Events, §3.2 isolation | Covered |
+| Sandboxes, plugins, lifecycle events | §2.2 SandboxProvider, §16 Plugins, §19 Lifecycle Events | Pluggable sandbox interface + implementations |
 | Uniform agent abstraction | §2 Agent Protocol | AgentProvider interface |
 | Same subsystems as GT, configurable | §10-16 | Beads, mail, nudge, formulas, molecules, convoys, plugins |
-| Daemon with websocket transparency | §7.4 Websocket Transparency | Streams all data types |
+| Higher-level on lower-level layering | §1.1 Substrate Layering Principle | 6-layer hierarchy, invariants, substrate table |
+| Daemon with websocket transparency | §7.4 Websocket, §8.2/§8.3 Durable Event Log | Historical (JSONL) + real-time streaming, formal Event struct |
 | Worker naming (name pools) | §2.7 Pool Naming | Themed names matching Gas Town |
 | Failure recovery (stale hooks) | §9.3, §10.3 | Session liveness + worktree safety |
 | Complete CLI parity with GT | §17 CLI Design | done, seance, hook subcommands, task close |
@@ -2282,7 +2462,7 @@ ready(s) ⟺ ∀di ∈ D: status(di) = closed
 | Lifecycle events | §19 Lifecycle Events | Shell commands on events |
 | Session management (tmux) | §7 Controller | Session patterns, crash recovery |
 | Controller/CLI contract | §7.5 | Single-writer via Unix socket, atomic writes |
-| Websocket streaming | §7.4, §8.2 | Historical + real-time |
+| Websocket streaming | §7.4, §8.2/§8.3 | Historical + real-time, Event struct |
 | Name pool (worker naming) | §2.7 Pool Naming | Themed names, allocation/release |
 | Resume (session continuity) | §2.8 Resume Capabilities | Provider-specific, separate from crash recovery |
 | Wisps (ephemeral beads) | §10.2 Bead Types | Ephemeral beads for patrol cycles, transient ops |
