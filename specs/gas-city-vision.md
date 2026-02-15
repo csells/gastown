@@ -2,10 +2,10 @@
 
 From https://steve-yegge.medium.com/steveys-birthday-blog-34f437139cb5:
 
-- Gas City is an orchestration-builder toolkit (not just an orchestrator)
+- Gas City is an orchestration-builder toolkit (not just an orchestrator).
 
-- GC is the next step beyond Gas Town for “Level 8” folks building their own
-  orchestrators
+- GC is the next step beyond Gas Town for folks building their own orchestrators
+  from simple to complex in natural.
 
 - GC is a “kit” for building different “town shapes”, i.e. multiple
   architectures / topologies, not one canonical layout. You'll be able to build
@@ -20,19 +20,14 @@ From https://steve-yegge.medium.com/steveys-birthday-blog-34f437139cb5:
   a progressive capabilities as needed.
 
 - To populate GC, you can create your own roles, teams, coordination rules, and
-  worker instructions (a full configurability surface)
+  worker instructions (a full configurability surface).
 
 - Roles are expressed in a format external to and not hardcoded into the code,
   e.g. beads, markdown files, etc.
 
 - GC supports wiring in sandboxes, plugins, and hooks (explicit extensibility +
-  integration points)
-
-- Every AI coding agent — regardless of implementation — is accessed through a
-  uniform "factory worker" abstraction. This decouples the orchestration logic
-  from any specific coding agent (Claude Code, Codex, Gemini, OpenCode, etc) or
-  execution substrate (tmux, Docker, Agent SDK, custom code). The rest of the
-  SDK builds exclusively on this abstraction.
+  integration points), etc -- the full range of Gas Town functionality, but
+  layered in optionally depending on the user's needs
 
 - GC provides the same set of capabilities and subsystems as GT, but
   configurable instead of hardcoded, e.g. the mayor is part of a "gastown.toml"
@@ -41,3 +36,9 @@ From https://steve-yegge.medium.com/steveys-birthday-blog-34f437139cb5:
 - GC is completely transparent and can be traced via the deamon that provides a
   websocket that shows the historical data and streaming changes to data, e.g.
   agent request/response pairs, mail, beads, agent active status, etc.
+
+- Every AI coding agent — regardless of implementation — is accessed through a
+  uniform "factory worker" abstraction. This decouples the orchestration logic
+  from any specific coding agent (Claude Code, Codex, Gemini, OpenCode, etc) or
+  execution substrate (tmux, Docker, Agent SDK, custom code). The rest of the
+  SDK builds exclusively on this abstraction.
