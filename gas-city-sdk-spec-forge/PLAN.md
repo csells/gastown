@@ -38,6 +38,9 @@ Gas City is an **orchestration-builder SDK** that extracts Gas Town's hardcoded 
 - Multi-tenant isolation
 - Agent marketplace / sharing
 - Automatic prompt engineering
+- Out-of-process plugin protocol (deferred to Phase 8; see Section 20.1)
+- Pre-event hooks (post-event only in v1; see Section 20.2)
+- Beads backend implementation details (existing Gas Town artifact; see Section 20.6)
 
 ---
 
@@ -2698,3 +2701,69 @@ If `StartWorkspace()` fails at agent `k` of `n`, agents `1..k-1` are stopped in 
 4. **State persistence across restarts.** Claude-code uses tmux session survival + `/resume`. Other runtimes need checkpoint files. The `AgentRegistry` persists logical identities to `.gc/agents/` for crash recovery. Define `StateCheckpoint` interface in Phase 3.
 
 5. **`gc` vs `gt` CLI namespace.** Options: (a) `gc` is a separate binary, (b) `gt gc` subcommand, (c) `gt` detects Gas City mode and adjusts behavior. Recommendation: (a) separate binary for clarity.
+
+---
+
+## 20. Known Gaps (Vision Alignment)
+
+The following gaps were identified by comparing this spec against `specs/gas-city-vision.md`. All 8 vision requirements are fully addressed in the spec's architecture, but these areas have weaker coverage — deliberate v1 scope limits that should be addressed in future phases.
+
+### 20.1 Out-of-Process Plugin Protocol
+
+**Vision requirement:** Plugins (extensibility + integration points)
+
+**Gap:** v1 supports only in-process Go adapters and subprocess wrappers. Third-party plugin authors must either write Go code and link it into the binary, or wrap their tool as a CLI and use the `subprocess` adapter. There is no language-agnostic plugin protocol.
+
+**Current mitigation:** The `RegisterAdapter()` API (Section 2.8, line 479) allows Go-level extension. The `subprocess` adapter (Section 2.7) wraps any CLI tool. These cover most use cases but are not equivalent to a true plugin system.
+
+**Resolution plan:** JSON-RPC over stdin/stdout (LSP-style) protocol for out-of-process adapters, deferred to Phase 8 (see Open Question 1). This will enable adapters written in Python, TypeScript, Rust, etc.
+
+### 20.2 No Pre-Event Hooks
+
+**Vision requirement:** Hooks (lifecycle events)
+
+**Gap:** All hooks defined in the TOML schema (Section 3.2, lines 596-602) are post-event: `on_start`, `on_stop`, `on_task_assign`, `on_task_complete`, `on_task_fail`, `on_stall`. There is no mechanism for pre-event hooks that can intercept and veto actions before they happen (e.g., "should I accept this task?", "should I start this agent?").
+
+**Current mitigation:** Pre-event decision logic can be expressed in agent prompts (system prompt instructions) and coordination rules (`depends_on`, workflow templates). Hooks are for side effects (notifications, scripts), not policy decisions.
+
+**Resolution plan:** Consider adding `before_task_assign` and `before_start` hooks in a future version. These would return a boolean (proceed/abort) and enable policy-based gating without modifying SDK source. However, this adds complexity to the event dispatch path and must be designed carefully to avoid blocking the control plane.
+
+### 20.3 Thin Sandbox Implementation Detail
+
+**Vision requirement:** Sandboxes (isolation modes)
+
+**Gap:** The spec defines four isolation strategies (Section 3.2, lines 554-558): `none`, `worktree`, `directory`, `container`. However, only `worktree` has significant implementation detail via the existing Gas Town tmux adapter. The `directory` and `container` modes lack pseudocode, setup/teardown algorithms, and edge case documentation.
+
+**Current mitigation:** `worktree` isolation is well-understood from Gas Town. `container` isolation maps to the Docker adapter (Section 2.4, line 310). `directory` is a straightforward temp-dir copy pattern. All three are standard patterns that implementers can follow.
+
+**Resolution plan:** Add implementation sketches for `directory` (temp dir creation, file sync, cleanup) and `container` (Dockerfile generation, volume mounting, network isolation) during Phase 2 (Agent Teams) when isolation becomes critical for pooled workers.
+
+### 20.4 No Formal Coordination Grammar
+
+**Vision requirement:** Custom coordination rules
+
+**Gap:** Complex multi-agent coordination protocols rely on a combination of TOML config fields (`depends_on`, `hooks`, `loop`), natural language prompts, and workflow templates. There is no formal grammar or DSL for expressing coordination rules like "if agent A produces output X, route to agent B; otherwise escalate to coordinator." Coordination logic beyond startup ordering and event hooks must be embedded in agent prompts.
+
+**Current mitigation:** Workflow templates (Section 10) provide structured multi-step processes with dependency chains, retry strategies, and parallel execution. The messaging system (Section 9) enables agents to coordinate via direct messages and channels. The combination of workflows + messaging + prompts covers most coordination patterns.
+
+**Resolution plan:** Evaluate whether a lightweight coordination DSL (e.g., state machine definitions in TOML) is needed based on Phase 3+ user feedback. The current prompt-based approach is more flexible but less verifiable. A DSL would enable static analysis of coordination correctness but risks over-engineering for v1.
+
+### 20.5 No Role Definition Schema Validation
+
+**Vision requirement:** Roles expressed externally
+
+**Gap:** Role definitions are externalized as markdown files with Go template variables (Section 4.4, lines 1046-1060), but there is no schema or validation for these files. An invalid role prompt (e.g., referencing `{{.NonexistentVar}}`, missing required sections, or containing contradictory instructions) would only surface as runtime agent behavior failures, not as config-time errors.
+
+**Current mitigation:** `gc validate` (Section 3.4) validates the TOML config structure but does not validate prompt content. Template variable expansion is checked at render time, which catches undefined variables but not semantic errors.
+
+**Resolution plan:** Add optional role prompt linting to `gc validate` in a future version. This could check for: (a) undefined template variables, (b) required sections (e.g., "Responsibilities", "Coordination rules"), (c) references to configured channels/agents that exist in the workspace. This is a quality-of-life improvement, not a correctness requirement.
+
+### 20.6 Beads Task Backend Not Specified
+
+**Vision requirement:** Work tracking / task system
+
+**Gap:** The beads task backend is referenced throughout the spec as a first-class option (Section 3.2 line 610, Section 8.2 line 1585, Section 4.2 line 782) but its implementation is not specified in this document. The beads system is an existing Gas Town artifact (Dolt-based structured data) and is assumed to be available.
+
+**Current mitigation:** The `TaskBackend` interface (Section 8.1) fully defines the contract that any backend must satisfy. The filesystem backend (Section 8.2, lines 1592-1635) provides a zero-dependency reference implementation. The beads backend wraps an existing, working system.
+
+**Resolution plan:** The beads backend implementation is a thin adapter layer over Gas Town's existing Dolt/beads infrastructure. It does not require new specification — it requires mapping the `TaskBackend` interface to existing beads SQL queries. This mapping is straightforward and will be documented during Phase 1 implementation as inline code comments.
