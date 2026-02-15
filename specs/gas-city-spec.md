@@ -1,9 +1,9 @@
 # Gas City SDK — Technical Specification
 
-> **Version:** 0.6.0
+> **Version:** 0.9.0
 > **Date:** 2026-02-15
 > **Status:** Planning (grounded in Gas Town source exploration)
-> **Predecessor:** v0.5.0 (spec-forge pipeline; this revision aligns with Gas Town reality)
+> **Predecessor:** v0.8.0 (Codex audit: hardcoded role elimination, controller/CLI contract, runtime error model, pinned status data model, addressing consistency, config precedence, plugin execution, event bus backpressure, health restart backoff)
 
 ---
 
@@ -18,7 +18,7 @@ Gas City is an **orchestration-builder SDK** — a Go toolkit for composing mult
 **Three example configs ship with the SDK:**
 - `ralph.toml` — Single agent with task loop
 - `ccat.toml` — Claude Code Agent Teams: coordinator + worker pool
-- `gastown.toml` — Complete Gas Town replication with all 7 roles, formulas, plugins, multi-project support
+- `gastown.toml` — Complete Gas Town replication with all 8 roles, formulas, plugins, multi-project support
 
 These are examples, not defaults. `gc init --file ralph.toml` copies an example to the workspace.
 
@@ -39,7 +39,7 @@ These are examples, not defaults. `gc init --file ralph.toml` copies an example 
 - What each role does (prompt templates)
 - Health thresholds, session patterns, env vars
 - Which subsystems are active (tasks, messaging, formulas, etc.)
-- Coordination rules (depends_on, hooks, workflows)
+- Coordination rules (depends_on, lifecycle events, workflows)
 - Formulas, plugins, and their gate conditions
 
 **What this spec does NOT cover:**
@@ -115,12 +115,14 @@ type Adopter interface {
 
 ### 2.3 Core Data Structures
 
+> **Note:** `AgentConfig` represents the **resolved** configuration after merging workspace TOML settings with role definitions (`roles/*.toml`). Fields like `PromptTemplate` and `NudgeMessage` are resolved from the role file, not directly specified in the workspace config.
+
 ```go
 type AgentIdentity struct {
     Workspace string  // Workspace name
     Project   string  // Project name (empty for workspace-scoped)
     Name      string  // Agent name from config
-    Instance  int     // Pool instance index (0 for non-pooled)
+    Instance  string  // Pool instance name ("Toast", "Furiosa"; empty for non-pooled)
 }
 
 type AgentHandle struct {
@@ -136,25 +138,67 @@ type AgentConfig struct {
     Name           string
     Role           string
     Provider       string            // "claude", "codex", "gemini", etc.
-    Project        string            // Empty for workspace scope
-    Command        string            // e.g., "claude"
-    Args           []string          // e.g., ["--dangerously-skip-permissions"]
+    Scope          string            // "workspace" or "project"
+    Project        string            // Resolved project name (empty for workspace scope)
+    Session        *SessionConfig
     Env            map[string]string
-    WorkDir        string
-    PromptTemplate string            // Path to Markdown Go template
-    NudgeMessage   string            // Default nudge text
-    SessionPattern string            // tmux session name pattern
+    PromptTemplate string            // Path to Markdown Go template (from role file)
+    NudgeMessage   string            // Default nudge text (from role file)
     DependsOn      []string          // Agent names that must start first
     Ephemeral      bool              // Created/destroyed per-task
     Isolation      string            // "none", "worktree", "directory"
     Pool           *PoolConfig
     Loop           *LoopConfig
     Health         *HealthConfig
-    Hooks          *HookConfig
+    Lifecycle      *LifecycleConfig  // Shell commands on lifecycle events (§19)
+    Resume         *ResumeConfig     // Provider resume metadata (§2.8)
+}
+
+type SessionConfig struct {
+    Pattern       string // tmux session name pattern, e.g., "gc-{project}-{name}"
+    WorkDir       string // Working directory pattern, e.g., "{workspace}/{project}"
+    StartCommand  string // Override command (default from provider)
+    NeedsPreSync  bool   // Git pull before session start
+}
+
+type PoolConfig struct {
+    Min               int
+    Max               int
+    IdleTimeout       time.Duration
+    Theme             string   // Name pool theme (§2.7)
+    Names             []string // Custom name list (overrides theme)
+    MaxBeforeOverflow int      // Switch to numbered overflow (default 50)
+}
+
+type LoopConfig struct {
+    Enabled     bool
+    AutoExecute bool          // GUPP: auto-start when work on hook
+    PollInterval time.Duration // Default: 10s
+}
+
+type HealthConfig struct {
+    PingTimeout         time.Duration // Default: 30s
+    StuckThreshold      time.Duration // Default: 1h (varies by role)
+    ConsecutiveFailures int           // Default: 3
+    KillCooldown        time.Duration // Default: 5m
+}
+
+type LifecycleConfig struct {
+    OnStart        string // Shell command run when agent starts
+    OnStop         string // Shell command run when agent stops
+    OnTaskAssign   string // Shell command run when bead hooked to agent
+    OnTaskComplete string // Shell command run when bead closed
+    OnStall        string // Shell command run when agent detected stalled
+}
+
+type PingResult struct {
+    Alive   bool
+    Latency time.Duration
+    Output  string // Last line of agent output (provider-specific)
 }
 
 type AgentState struct {
-    Status        AgentStatus // Running, Idle, Working, Stalled, Stopped
+    Status        AgentStatus // Stopped, Starting, Idle, Working, Stalled
     CurrentTask   string      // Bead ID being worked on
     LastActivity  time.Time
     HookBead      string      // Bead pinned to agent's hook
@@ -173,18 +217,18 @@ const (
 
 ### 2.4 Built-in Providers
 
-All providers Gas Town supports today:
+**Target provider matrix** — all providers Gas Town supports today. Phase column indicates when each provider ships (§22):
 
-| Provider | Command | Flags | Hooks | Resume | Session |
-|----------|---------|-------|-------|--------|---------|
-| `claude` (default) | `claude` | `--dangerously-skip-permissions` | Native | `--resume` (flag) | tmux |
-| `codex` | `codex` | `--yolo` | No | `resume <id>` (subcommand) | tmux |
-| `gemini` | `gemini` | `--approval-mode yolo` | Yes | No | tmux |
-| `opencode` | `opencode` | — | Yes (plugin) | No | tmux |
-| `cursor` | `cursor-agent` | `-f` | No | No | tmux |
-| `auggie` | `auggie` | `--allow-indexing` | No | No | tmux |
-| `amp` | `amp` | `--dangerously-allow-all --no-ide` | No | `threads continue <id>` (subcommand) | tmux |
-| `subprocess` | (any) | (any) | No | No | stdin/stdout |
+| Provider | Command | Flags | Provider Hooks | Resume | Session | Phase |
+|----------|---------|-------|----------------|--------|---------|-------|
+| `claude` (default) | `claude` | `--dangerously-skip-permissions` | Native | `--resume` (flag) | tmux | 1 |
+| `subprocess` | (any) | (any) | No | No | stdin/stdout | 1 |
+| `codex` | `codex` | `--yolo` | No | `resume <id>` (subcommand) | tmux | 5 |
+| `gemini` | `gemini` | `--approval-mode yolo` | Yes | `--resume` (flag) | tmux | 5 |
+| `opencode` | `opencode` | env: `OPENCODE_PERMISSION` | Yes (plugin) | No | tmux | 5 |
+| `cursor` | `cursor-agent` | `-f` | No | `--resume` (flag) | tmux | 5 |
+| `auggie` | `auggie` | `--allow-indexing` | No | `--resume` (flag) | tmux | 5 |
+| `amp` | `amp` | `--dangerously-allow-all --no-ide` | No | `threads continue <id>` (subcommand) | tmux | 5 |
 
 All tmux-based providers use the same session management: create session, inject env vars, send prompt via `send-keys`. The `subprocess` provider is the generic fallback for any CLI tool via stdin/stdout pipes.
 
@@ -200,6 +244,76 @@ When `provider` is omitted from config, the SDK checks for available binaries in
 **P4 — Bounded Cleanup:** `Stop(handle, false)` releases all OS resources within `kill_cooldown`.
 **P5 — Thread Safety:** Concurrent calls to `SendPrompt()`, `ReadOutput()`, `GetState()`, `Ping()` on the same handle are safe.
 
+**Standard sentinel errors:**
+
+```go
+var (
+    ErrNotSupported          = errors.New("operation not supported by provider")
+    ErrNotFound              = errors.New("agent or bead not found")
+    ErrConflict              = errors.New("concurrent modification conflict")
+    ErrInvalidState          = errors.New("invalid state transition")
+    ErrNotAssignee           = errors.New("agent is not the current assignee")
+    ErrTemporarilyUnavailable = errors.New("resource temporarily unavailable, retry later")
+)
+```
+
+**Idempotency rules for mutating operations:**
+- `Hook()`: Returns `ErrConflict` if bead already hooked by another agent. Returns nil if already hooked by the same agent (idempotent).
+- `Unhook()`: Returns `ErrNotAssignee` if agent is not the current assignee. Returns nil if bead already open (idempotent).
+- `Close()`: Returns `ErrNotAssignee` if agent is not the current assignee. Returns nil if bead already closed (idempotent).
+- `Pin()`: Returns nil if bead already pinned (idempotent).
+- `Stop()`: Returns nil if agent already stopped (P1).
+
+All sentinel errors support `errors.Is()` wrapping — providers and backends may wrap these with context while preserving identity.
+
+### 2.7 Pool Naming
+
+Ephemeral pool agents receive human-readable names from themed name pools rather than numeric indices. This matches Gas Town's naming system where polecats get names like "Toast", "Furiosa", "Obsidian".
+
+Name pool fields are part of `PoolConfig` (§2.3): `Theme`, `Names`, `MaxBeforeOverflow`.
+
+**Built-in Themes:**
+
+| Theme | Examples | Count |
+|-------|----------|-------|
+| `mad-max` (default) | furiosa, nux, slit, rictus, toast, dag, cheedo, valkyrie | 50 |
+| `minerals` | obsidian, quartz, jasper, onyx, opal, topaz, garnet, ruby | 50 |
+| `wasteland` | rust, chrome, nitro, guzzle, shiny, fury, witness | 50 |
+
+**Allocation rules:**
+1. Theme selection is deterministic: hash of project name selects theme (variety across projects).
+2. Names allocated in order from the theme list.
+3. Reserved infrastructure names (`witness`, `mayor`, `deacon`, `refinery`, `crew`, `polecats`) are filtered out.
+4. When a pool agent is destroyed, its name is released for reuse.
+5. When theme names are exhausted (>50 agents), overflow naming: `{project}-51`, `{project}-52`, etc.
+6. Custom names (via config) override the theme entirely.
+
+**Session naming:** Agent name "Toast" in project "gastown" → tmux session `gc-gastown-toast` (lowercase), agent ID `gastown/polecats/Toast` (original case preserved).
+
+### 2.8 Resume Capabilities
+
+Some providers support session resume (continuing a previous conversation). Resume is provider-specific and not part of the `AgentProvider` interface — instead, resume metadata is stored in the provider's config:
+
+```go
+type ResumeConfig struct {
+    Flag    string // e.g., "--resume" (Claude), "resume" (Codex)
+    Style   string // "flag" (appended to command) or "subcommand" (prefixed)
+    IDEnv   string // Env var storing session ID (e.g., "CLAUDE_SESSION_ID")
+}
+```
+
+| Provider | Resume Flag | Style | Session ID Env |
+|----------|-------------|-------|----------------|
+| `claude` | `--resume` | flag | `CLAUDE_SESSION_ID` |
+| `codex` | `resume` | subcommand | (captured from JSONL output) |
+| `gemini` | `--resume` | flag | `GEMINI_SESSION_ID` |
+| `cursor` | `--resume` | flag | (uses chatId directly) |
+| `auggie` | `--resume` | flag | — |
+| `amp` | `threads continue` | subcommand | — |
+| `opencode` | — | — | (manages sessions internally) |
+
+Resume is distinct from crash recovery (`Adopter` interface). Resume provides conversation continuity; `Adopter` reconnects to a surviving process after controller crash.
+
 ---
 
 ## 3. Configuration Schema
@@ -213,8 +327,15 @@ When `provider` is omitted from config, the SDK checks for available binaries in
 - **Plugins:** Markdown with TOML frontmatter in `plugins/*.md`
 - **Beads config:** YAML in `.beads/config.yaml`
 
-**Detection logic:**
-1. `*.toml` with `[workspace]` section exists → Gas City mode
+**Config resolution order:**
+1. `--config <path>` flag (explicit) → use that file
+2. `GC_CONFIG` environment variable → use that path
+3. `.gc/config.toml` pointer file (contains path to workspace TOML) → follow pointer
+4. Single `*.toml` with `[workspace]` section in current directory → use that file
+5. Multiple `*.toml` with `[workspace]` → error: "multiple Gas City configs found: X, Y. Use --config to select."
+
+**Mode detection:**
+1. Config resolved per above → Gas City mode
 2. `mayor/town.json` exists without Gas City config → Gas Town compatibility mode
 3. Neither → fresh workspace, `gc init` required
 
@@ -254,6 +375,10 @@ GC_SCOPE = "{scope}"
 min = 0
 max = 5
 idle_timeout = "5m"
+theme = ""                      # Name pool theme: "mad-max", "minerals", "wasteland"
+                                # Default: auto-selected by hash of project name
+names = []                      # Custom name list (overrides theme)
+max_before_overflow = 50        # Switch to numbered names after this count
 
 [agents.loop]                   # Task loop configuration
 enabled = false
@@ -265,13 +390,21 @@ ping_timeout = "30s"
 stuck_threshold = "1h"          # 1h (coordinator), 2h (workers), 4h (persistent)
 consecutive_failures = 3
 kill_cooldown = "5m"
+max_restarts_per_window = 5     # Quarantine after this many restarts (§9.1)
+restart_window = "1h"           # Window for counting restarts
+max_restart_backoff = "30m"     # Cap on exponential backoff
 
-[agents.hooks]                  # Lifecycle hooks (shell commands)
+[agents.lifecycle]              # Lifecycle event handlers (shell commands)
 on_start = ""
 on_stop = ""
 on_task_assign = ""
 on_task_complete = ""
 on_stall = ""
+
+[agents.resume]                 # Provider resume configuration (§2.8)
+flag = ""                       # e.g., "--resume" (Claude), "resume" (Codex)
+style = ""                      # "flag" or "subcommand"
+id_env = ""                     # Env var storing session ID
 
 # === PROJECTS (RIGS) ===
 [projects.<name>]
@@ -297,6 +430,10 @@ dir = ".beads/formulas"         # Directory containing *.formula.toml files
 [plugins]
 dir = "plugins"                 # Directory containing *.md plugin files
 
+# === CHANNELS (nudge groups) ===
+[channels.<name>]
+members = []                    # Agent names; pool names expand to all instances
+
 # === DAEMON ===
 [daemon]
 websocket_port = 8765           # Websocket port for transparency streaming
@@ -309,19 +446,56 @@ Every setting has a reasonable default so users only configure what they need:
 
 | Setting | Default | Notes |
 |---------|---------|-------|
+| **Workspace** | | |
+| `workspace.version` | `1` | Schema version (for future migrations) |
+| **Agent identity** | | |
 | `provider` | Auto-detected | Scans PATH for known binaries |
 | `scope` | `"project"` | Most agents are project-scoped |
 | `ephemeral` | `false` | Persistent by default |
 | `isolation` | `"worktree"` | Git worktree (Gas Town's default) |
+| `depends_on` | `[]` | No dependencies |
+| **Session** | | |
+| `session.pattern` | `"gc-{project}-{name}"` | Tmux session name |
+| `session.work_dir` | `"{workspace}/{project}"` | Working directory |
+| `session.start_command` | `""` | Uses provider default |
+| `session.needs_pre_sync` | `false` | No git pull before start |
+| **Pool** | | |
 | `pool.min` | `0` | Scale to zero when idle |
 | `pool.max` | `5` | Reasonable concurrency limit |
+| `pool.idle_timeout` | `"5m"` | Release idle instances |
+| `pool.theme` | Auto-selected | Hash of project name picks theme |
+| `pool.names` | `[]` | Use theme names |
+| `pool.max_before_overflow` | `50` | Switch to numbered names after this |
+| **Loop** | | |
+| `loop.enabled` | `false` | Must opt-in to task loop |
+| `loop.auto_execute` | `false` | Must opt-in to GUPP |
 | `loop.poll_interval` | `"10s"` | Balance responsiveness vs overhead |
+| **Health** | | |
 | `health.ping_timeout` | `"30s"` | |
-| `health.stuck_threshold` | `"1h"` | |
+| `health.stuck_threshold` | `"1h"` | Varies by role (1h–4h) |
 | `health.consecutive_failures` | `3` | |
 | `health.kill_cooldown` | `"5m"` | |
+| `health.max_restarts_per_window` | `5` | Quarantine threshold |
+| `health.restart_window` | `"1h"` | Window for counting restarts |
+| `health.max_restart_backoff` | `"30m"` | Cap on exponential backoff |
+| **Lifecycle** | | |
+| `lifecycle.on_start` | `""` | No handler |
+| `lifecycle.on_stop` | `""` | No handler |
+| `lifecycle.on_task_assign` | `""` | No handler |
+| `lifecycle.on_task_complete` | `""` | No handler |
+| `lifecycle.on_stall` | `""` | No handler |
+| **Resume** | | |
+| `resume.flag` | `""` | Provider default or none |
+| `resume.style` | `""` | Provider default or none |
+| `resume.id_env` | `""` | Provider default or none |
+| **Subsystems** | | |
 | `tasks.backend` | `"beads"` | Beads is the primary backend |
+| `tasks.beads.data_dir` | `".beads"` | Beads storage location |
 | `messaging.backend` | `"beads"` | |
+| `formulas.dir` | `".beads/formulas"` | Formula discovery path |
+| `plugins.dir` | `"plugins"` | Plugin discovery path |
+| `projects.*.branch` | `"main"` | Default git branch |
+| **Daemon** | | |
 | `daemon.websocket_port` | `8765` | |
 | `daemon.patrol_interval` | `"3m"` | Gas Town's deacon heartbeat interval |
 
@@ -337,6 +511,18 @@ Every setting has a reasonable default so users only configure what they need:
 | depends_on is acyclic | "dependency cycle: X → Y → X" |
 | Role files exist (if referenced) | "role file not found: roles/X.toml" |
 | Template files exist (if referenced) | "template not found: roles/X.md.tmpl" |
+| Pool min ≤ max | "pool min (X) exceeds max (Y)" |
+| Loop requires tasks | "agents.loop requires [tasks] section" |
+| Worktree requires git | "worktree isolation requires git repository" |
+| Formula step needs refs exist | "step X references unknown dependency Y" |
+| Convoy synthesis depends_on refs exist | "synthesis depends_on references unknown leg Y" |
+| Scope is valid enum | "invalid scope: X (must be 'workspace' or 'project')" |
+| Isolation is valid enum | "invalid isolation: X (must be 'none', 'worktree', or 'directory')" |
+| Backend is valid enum | "invalid backend: X (must be 'beads' or 'filesystem')" |
+| Pool theme is known or custom names set | "unknown pool theme: X" |
+| Duration fields parse | "invalid duration: X (must be Go duration like '5m', '1h')" |
+| Channel members reference agents | "channel X member Y not found in agents" |
+| Health stuck_threshold ≥ ping_timeout | "stuck_threshold (X) must be ≥ ping_timeout (Y)" |
 
 ---
 
@@ -352,10 +538,13 @@ Each level adds one capability. Config grows; the SDK is constant.
 | 3 | + Coordinator + workers | Multiple agents, worker pool with `[agents.pool]` |
 | 4 | + Messaging | Add `[messaging]` — mail + nudge |
 | 5 | + Formulas & molecules | Add `[formulas]` — workflow templates |
-| 6 | + Health monitoring | Add supervisor agent with `[agents.health]` patrol config |
-| 7 | Full orchestration | Multiple projects, all roles, multi-project formulas |
+| 6 | + Health monitoring | Add `[agents.health]` on any agent + `[daemon]` for patrol loop |
+| 7 | + Plugins | Add `[plugins]` — automated actions with gate conditions |
+| 8 | Full orchestration | Multiple projects, all roles, multi-project formulas |
 
-**Level detection** is automatic: the config parser examines which sections are present and determines the capability level. Each level is independently useful — you don't need Level 7 to benefit from Level 2.
+> **Note on Level 6:** Health monitoring has two aspects: (a) per-agent `[agents.health]` thresholds (available at any level) and (b) the daemon patrol loop (`[daemon]`) that runs the actual monitoring cycle. Level 6 activates the patrol loop. Plugins (Level 7) are orthogonal to health monitoring — they can be added at any level but are listed here for progressive ordering.
+
+**Level detection** is automatic: the config parser examines which sections are present and determines the capability level. Each level is independently useful — you don't need Level 8 to benefit from Level 2.
 
 ---
 
@@ -422,7 +611,7 @@ enabled = true
 auto_execute = true
 ```
 
-### 5.3 gastown.toml — Full Gas Town Replication (Level 7)
+### 5.3 gastown.toml — Full Gas Town Replication (Level 8)
 
 ```toml
 [workspace]
@@ -613,10 +802,9 @@ No confirmation. No waiting. The hook having work IS the assignment.
 1. git status (check what changed)
 2. git add <files>
 3. git commit -m "..."
-4. git push
-5. gc mol step done (if working on molecule)
+4. gc done (pushes, creates MR, closes bead, cleans up)
 
-**Work is not done until pushed.**
+**Work is not done until `gc done` completes.**
 ```
 
 Templates use Go `text/template` with variables: `.Role`, `.Project`, `.Workspace`, `.AgentName`, `.Instance`, and any custom variables from the role's `[env]` section.
@@ -643,6 +831,7 @@ These roles ship as example files with the SDK, not as hardcoded behavior:
 | mayor | workspace | Global coordinator. Dispatches tasks, breaks down epics, manages projects. |
 | deacon | workspace | Daemon beacon. Receives heartbeats, watches witnesses, manages dogs. |
 | dog | workspace | Workspace-level infrastructure worker. Cross-project tasks, cleanup, maintenance. |
+| boot | workspace | Special dog that monitors the Deacon itself every 5 minutes — the watchdog's watchdog. |
 | witness | project | Per-project monitor. Tracks worker progress, detects stalls, reports to deacon. |
 | refinery | project | Merge queue processor. Verification gates, conflict resolution. |
 | polecat | project | Ephemeral batch worker. Executes individual tasks, self-cleans on completion. |
@@ -659,7 +848,7 @@ The workspace controller is the long-lived daemon that hosts all control loops.
 1. **`gc start`** launches the controller (foreground by default, `--daemon` to background)
 2. Acquires `.gc/controller.lock` via `flock` — at most one controller per workspace
 3. Starts event bus, loads providers, runs startup sequencer
-4. Starts control loops: pool managers, patrol cycle, hook executor
+4. Starts control loops: pool managers, patrol cycle, lifecycle executor, plugin gate evaluator
 5. Opens websocket for transparency streaming
 6. **`gc stop`** sends shutdown signal, runs shutdown sequencer
 
@@ -692,7 +881,25 @@ The daemon provides a websocket endpoint that streams all system activity:
 - Formula/molecule progress
 - Health patrol results
 
-Clients connect and receive a catch-up replay of recent history, then real-time streaming. Three built-in consumers:
+Clients connect and receive a catch-up replay of recent history, then real-time streaming.
+
+### 7.5 Controller/CLI Contract
+
+**The controller is the single writer for all mutable state.** When the controller is running, CLI commands (`gc bead`, `gc hook`, `gc sling`, etc.) act as thin clients that communicate with the controller via a local Unix domain socket (`.gc/controller.sock`). The controller serializes all mutations and emits events.
+
+**When the controller is NOT running**, CLI commands fall back to direct file/database access with advisory locking. This enables simple Level 0-2 workflows without a daemon.
+
+**Why this matters:** Agents running `gc` commands inside tmux sessions are concurrent with the controller's patrol, pool management, and lifecycle loops. Without a single-writer contract, Hook/Unhook/Close operations from agents race with stale hook scanning, pool scaling, and lifecycle handlers — causing missed events, double-hooks, and phantom state.
+
+**RPC contract:**
+- CLI detects controller presence via `.gc/controller.sock` existence + liveness ping
+- All mutating operations (`Hook`, `Unhook`, `Close`, `Pin`, `Create`, `Update`, mail send, nudge) go through the controller when running
+- Controller emits events for every mutation, ensuring the event bus captures all state changes
+- Read operations (`List`, `Get`, `Ready`, `gc status`) may bypass the controller for lower latency
+
+**Atomic write pattern:** All state persistence (`.gc/agents/*.json`, registry files) uses atomic writes: write to temp file, then `os.Rename()`. This prevents corruption from controller crashes during writes.
+
+Three built-in consumers:
 
 - **`gc dashboard`** — Web UI consuming websocket
 - **`gc dashboard --tui`** — Terminal UI consuming websocket
@@ -716,12 +923,14 @@ const (
     // Tasks / beads
     EventBeadCreated    EventType = "bead.created"
     EventBeadHooked     EventType = "bead.hooked"
+    EventBeadUnhooked   EventType = "bead.unhooked"
     EventBeadClosed     EventType = "bead.closed"
 
     // Health
-    EventHealthPingOK   EventType = "health.ping_ok"
-    EventHealthPingFail EventType = "health.ping_fail"
-    EventHealthRestart  EventType = "health.restart"
+    EventHealthPingOK       EventType = "health.ping_ok"
+    EventHealthPingFail     EventType = "health.ping_fail"
+    EventHealthRestart      EventType = "health.restart"
+    EventAgentQuarantined   EventType = "agent.quarantined"
 
     // Messaging
     EventMailSent       EventType = "mail.sent"
@@ -740,14 +949,20 @@ const (
     // Convoy
     EventConvoyCreated  EventType = "convoy.created"
     EventConvoyClosed   EventType = "convoy.closed"
+
+    // Plugin
+    EventPluginFired    EventType = "plugin.fired"
+    EventPluginFailed   EventType = "plugin.failed"
 )
 ```
 
 ### 8.2 Tiered Subscriber Model
 
 The event bus has two tiers:
-- **Critical subscribers** (supervisor, structured logger, hook executor): Block `Publish()` — if they fail, the event is not silently lost.
-- **Optional subscribers** (websocket streamer, CLI feed, metrics): Fire-and-forget. Slow consumers may miss events but never stall the bus.
+- **Critical subscribers** (supervisor, structured logger, lifecycle executor): Delivered via bounded queues (capacity: 1000 events per subscriber). If a critical subscriber falls behind, excess events are written to an overflow log (`.gc/events-overflow.jsonl`) and the subscriber receives a gap notification on next read.
+- **Optional subscribers** (websocket streamer, CLI feed, metrics): Fire-and-forget via unbounded channel. Slow consumers may miss events but never stall the bus.
+
+**Backpressure protection:** Critical subscribers have a per-event timeout (default: 5s). If a subscriber (e.g., lifecycle executor running a shell command) exceeds the timeout, the event is queued and processing continues. This prevents lifecycle handlers from stalling the entire event bus. Lifecycle handlers that need long execution should spawn background processes.
 
 A ring buffer (10k events) provides catch-up replay when new subscribers connect (e.g., websocket clients joining late).
 
@@ -764,20 +979,29 @@ Health monitoring follows Gas Town's Deacon patrol pattern — configured via ro
 The patrol cycle runs at `daemon.patrol_interval` (default 3m):
 
 ```
-FOR each running agent (skip self):
+FOR each running agent (skip self, skip quarantined):
   result = Ping(agent)
   IF ping fails:
     agent.consecutive_failures++
   ELSE:
     agent.consecutive_failures = 0
+    agent.restart_count = 0      // Reset on success
 
   IF consecutive_failures >= agent.health.consecutive_failures:
-    IF time since last restart < kill_cooldown:
-      publish EventAgentStalled  // In cooldown, don't restart yet
+    backoff = kill_cooldown * (2 ^ agent.restart_count)  // Exponential backoff
+    backoff = min(backoff, max_restart_backoff)           // Cap at 30m default
+    IF time since last restart < backoff:
+      publish EventAgentStalled  // In backoff window, don't restart yet
+    ELSE IF agent.restart_count >= max_restarts_per_window:
+      quarantine(agent)          // Stop restarting, notify operator
+      publish EventAgentQuarantined
     ELSE:
+      agent.restart_count++
       Restart(agent)
       publish EventHealthRestart
 ```
+
+**Restart throttling:** Exponential backoff prevents restart thrashing. After `max_restarts_per_window` (default: 5) restarts within `restart_window` (default: 1h), the agent enters quarantine. Quarantined agents are stopped and require manual intervention (`gc agent restart <name>` or `gc agent unquarantine <name>`).
 
 ### 9.2 Stall Detection
 
@@ -790,7 +1014,33 @@ Stall thresholds from Gas Town defaults:
 - Polecat/Refinery: 2h
 - Crew: 4h
 
-### 9.3 Who Runs the Patrol?
+### 9.3 Stale Hook Scanning
+
+Hooked beads **persist across agent crashes** — the system does not automatically unhook on failure. A periodic stale hook scan detects orphaned work:
+
+```
+FOR each bead with status = hooked:
+  session = resolve assignee → tmux session name
+  IF session is confirmed dead:
+    check worktree for uncommitted changes / unpushed commits
+    IF partial work detected:
+      publish warning (operator notification)
+    unhook bead (status → open, available for re-claim)
+  ELSE IF session unknown AND bead age > max_age (default 1h):
+    unhook bead (age-based fallback)
+```
+
+**Worktree safety check:** Before unhooking a bead from a dead agent, the system checks the agent's worktree for uncommitted changes or unpushed commits. If partial work is detected, a warning is published so the operator can recover the work before it is re-assigned.
+
+**Two unhook criteria:**
+1. **Session confirmed dead** — tmux session no longer exists (or `IsRunning()` returns false for non-tmux providers) → unhook immediately
+2. **Unknown agent + age-based fallback** — assignee can't be resolved AND bead older than `max_age` → unhook as safety net
+
+**Multi-signal confirmation:** For non-tmux providers where session liveness isn't directly observable, the scan requires TWO consecutive patrol cycles confirming "not running" before unhooking. This prevents false positives from transient failures. The Unhook operation uses compare-and-swap semantics — it fails if the bead's assignee changed between check and unhook, preventing races with concurrent re-assignment.
+
+The stale hook scan runs as part of the patrol cycle (§9.1). In Gas Town, this is the Deacon's `stale-hooks` command.
+
+### 9.4 Who Runs the Patrol?
 
 In a full Gas Town config, the deacon agent runs the patrol. In simpler configs, the daemon itself runs the patrol loop. The user controls this via config — if a supervisor-like agent exists with health config, it takes over monitoring.
 
@@ -804,7 +1054,16 @@ Gas Town uses beads (Dolt-backed structured data) as its primary task system. Ga
 
 ### 10.2 Bead Types
 
-Bead types are **not hardcoded into the SDK**. They are part of the workspace's configuration — users can define whatever types make sense for their orchestration. The SDK treats the type field as an opaque string; specific semantics (like the hook slot on agent beads, or step children on molecule beads) are implemented as behaviors keyed on type, not as a fixed enum.
+Bead types fall into two categories:
+
+**Reserved system types** have SDK-level semantics that subsystems depend on. These type strings are reserved and the SDK implements specific behaviors for them:
+- `agent` — has hook slot, identity binding, used by registry and hook system
+- `molecule` — root bead with child step beads, used by molecule executor
+- `convoy` — batch tracking with `Tracks` dependencies, used by convoy manager
+- `mail` — priority-level queue entry, used by mail system
+- `wisp` — ephemeral, destroyed after run completes, used by plugin executor and patrol
+
+**User-defined types** are opaque strings with no SDK-level behavior. The SDK stores and filters them but attaches no special semantics. Users can define whatever types make sense for their orchestration (e.g., `task`, `bug`, `feature`, `epic`).
 
 Gas Town's bead taxonomy (shipped as examples):
 
@@ -818,6 +1077,13 @@ Gas Town's bead taxonomy (shipped as examples):
 | `convoy` | Batch tracking bead |
 | `mail` | Mail message |
 | `merge-request` | Merge queue entry |
+| `wisp` | Ephemeral bead — destroyed after the run completes (patrol cycles, plugin executions) |
+| `gate` | Async coordination point — park agents until conditions are met |
+| `slot` | Exclusive access control (e.g., merge slots) |
+| `queue` | Message queue routing |
+| `event` | Session/cost tracking events |
+| `role` | Agent role definition bead |
+| `rig` | Rig (project) identity bead |
 
 Users can define additional types as needed. The SDK's subsystems (formulas, convoys, mail) create beads of the appropriate type but don't restrict what types can exist.
 
@@ -827,13 +1093,23 @@ Gas Town's actual status model:
 
 ```
 open → hooked → closed
+         ↑
+       pinned (infrastructure only)
 ```
 
 - **open**: Available for claiming
 - **hooked**: Pinned to an agent's hook (being worked on)
 - **closed**: Completed
+- **pinned**: Permanent infrastructure record (agent identity beads, role definitions). Pinned beads are never claimed or closed — they represent persistent system entities.
 
 The `hooked` state is Gas Town's equivalent of "in-progress" — a bead is physically attached to an agent's hook bead via a dependency relationship. Only one agent can hook a bead at a time (atomic claiming via Dolt SQL transactions).
+
+**Failure recovery:** Hooked beads **survive agent crashes**. When an agent crashes or is restarted, its hooked bead remains in `hooked` status. Two recovery paths:
+
+1. **Agent restarts with work on hook** → GUPP applies: agent detects hooked work on startup, resumes execution.
+2. **Agent is dead (session gone)** → Stale hook scan (§9.3) detects the dead session, checks the worktree for partial work, and unhooks the bead (status → `open`), making it available for re-claim.
+
+Beads have **no built-in TTL or timeout**. Cleanup depends entirely on the health monitoring patrol cycle (§9).
 
 ### 10.4 Task Backend Interface
 
@@ -846,7 +1122,42 @@ type TaskBackend interface {
     Hook(beadID string, agentID string) error     // Atomic: attach to agent's hook
     Unhook(beadID string, agentID string) error
     Close(beadID string, agentID string) error
-    Ready() ([]Bead, error)                        // Beads with no blockers
+    Pin(beadID string) error                       // Mark as permanent infrastructure (§10.3)
+    Ready(filter TaskFilter) ([]Bead, error)       // Beads with no blockers, ordered by priority, filtered by scope
+}
+
+type Bead struct {
+    ID          string
+    Type        string            // "task", "bug", "feature", "agent", "molecule", "convoy", "mail", "merge-request", or user-defined
+    Status      string            // "open", "hooked", "closed", "pinned"
+    Pinned      bool              // True for permanent infrastructure beads (agent identity, role defs)
+    Title       string
+    Description string
+    Project     string            // Project scope (empty for workspace-level)
+    Assignee    string            // Agent ID currently hooked (empty if open)
+    Priority    int               // 0 = highest
+    Labels      []string
+    Needs       []string          // Bead IDs that must close before this is ready
+    Tracks      []string          // Non-blocking tracking refs (convoys)
+    CreatedAt   time.Time
+    ClosedAt    *time.Time
+    Metadata    map[string]string // Extensible key-value pairs
+}
+
+type BeadUpdates struct {
+    Title       *string
+    Description *string
+    Priority    *int
+    Labels      []string          // Replaces entire label set
+    Needs       []string          // Replaces entire needs set
+    Metadata    map[string]string // Merged with existing metadata
+}
+
+type TaskFilter struct {
+    Status  string   // Filter by status ("open", "hooked", "closed", "" for all)
+    Type    string   // Filter by bead type ("task", "bug", etc., "" for all)
+    Project string   // Filter by project ("" for all)
+    Labels  []string // Filter by labels (AND logic)
 }
 ```
 
@@ -862,11 +1173,11 @@ LOOP:
   IF check mail → messages exist:
     process mail (may contain assignments)
     GOTO LOOP
-  ready = backend.Ready()
+  ready = backend.Ready(TaskFilter{Project: self.project})  // Scope to agent's project
   IF len(ready) > 0:
     bead = ready[0]  // highest priority
-    ok = backend.Hook(bead.id, self.id)  // Atomic claim
-    IF !ok: GOTO LOOP  // Someone else got it
+    err = backend.Hook(bead.id, self.id)  // Atomic claim
+    IF err != nil: GOTO LOOP  // Someone else got it (or conflict)
     execute bead
     GOTO LOOP
   sleep(poll_interval)
@@ -910,9 +1221,10 @@ title = "Test {{feature}}"
 description = "Write and run tests"
 needs = ["implement"]
 
-[vars]
-[vars.feature]
+[inputs]
+[inputs.feature]
 description = "The feature being implemented"
+type = "string"
 required = true
 ```
 
@@ -928,6 +1240,7 @@ version = 1
 [inputs.pr]
 description = "Pull request number"
 type = "number"
+required = true
 
 [prompts]
 base = "Review PR #{{.pr}} focusing on {{.leg.focus}}"
@@ -955,7 +1268,18 @@ depends_on = ["correctness", "security", "performance"]
 directory = ".reviews/{{.review_id}}"
 leg_pattern = "{{.leg.id}}-findings.md"
 synthesis = "review-summary.md"
+
+# Presets — preconfigured leg selections users can choose
+[presets.gate]
+description = "Light review for automatic flow"
+legs = ["security", "correctness"]
+
+[presets.full]
+description = "Comprehensive review — all legs"
+legs = ["correctness", "security", "performance"]
 ```
+
+**Presets** are preconfigured selections of legs (convoy) or aspects that ship with a formula. Users select a preset at runtime via `--preset <name>`. If no preset is specified, all legs/aspects run. Presets are optional — formulas work without them.
 
 **Expansion** — Pre-computed step sequences:
 
@@ -994,17 +1318,56 @@ title = "Secrets Scanning"
 description = "Check for leaked credentials"
 ```
 
-### 11.3 Formula Validation Pipeline
+### 11.3 Template Variable Mechanisms
+
+Formulas use two template mechanisms:
+
+**Simple substitution** (`{{key}}`): Used in step titles, descriptions, and workflow/expansion formulas. Variables are resolved from `[inputs]` at instantiation time via `--var key=value`. Validated by regex `{{[a-zA-Z_][a-zA-Z0-9_]*}}`.
+
+> **Naming:** `[inputs]` is the unified section name for all formula types in Gas City. Gas Town's codebase uses separate `[inputs]` (convoy-specific) and `[vars]` (workflow-specific) as distinct struct fields. Gas City unifies these into a single `[inputs]` section that works across all formula types. The SDK parser accepts `[vars]` as an alias for migration compatibility, mapping it to `[inputs]` internally. New formulas should always use `[inputs]`.
+
+```toml
+# In step title:
+title = "Design {{feature}}"
+
+# Defined in [inputs]:
+[inputs.feature]
+description = "The feature being implemented"
+type = "string"            # "string" (default), "number", "boolean"
+required = true            # Must be provided via --var
+# required_unless = ["other_input"]  # Required unless another input is provided
+```
+
+**Input field reference:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `description` | string | Human-readable description |
+| `type` | string | `"string"` (default), `"number"`, `"boolean"` |
+| `required` | bool | Must be provided at instantiation |
+| `required_unless` | []string | Required unless one of the named inputs is provided |
+
+**Go template rendering** (`{{.field}}`): Used in convoy/aspect prompt templates and output patterns. The SDK injects a structured context map with both user inputs and runtime fields, accessed via Go `text/template` dot notation.
+
+| Formula Type | Context Fields |
+|-------------|---------------|
+| All types | `{{.formula_name}}`, `{{.target_description}}`, all `[inputs]` values |
+| Convoy | `{{.leg.id}}`, `{{.leg.focus}}`, `{{.leg.title}}` |
+| Aspect | `{{.aspect.id}}`, `{{.aspect.title}}` |
+
+Example: `"Review PR #{{.pr}} focusing on {{.leg.focus}}"` — `.pr` comes from `[inputs]`, `.leg.focus` is a runtime context field injected per-leg.
+
+### 11.4 Formula Validation Pipeline
 
 ```
-Parse TOML → Infer type (if ambiguous) → Validate schema per type → Cycle detection (workflow/expansion) → Variable resolution
+Parse TOML → Infer type (if ambiguous) → Validate schema per type → Cycle detection (workflow/expansion) → Input validation
 ```
 
 - Workflow/expansion: Steps form a DAG. Cycle detection via topological sort.
 - Convoy: Legs are parallel by definition; synthesis depends on all legs.
-- Variables: `{{feature}}` resolved at instantiation time via `--var key=value`.
+- Inputs: Required inputs checked at instantiation time (`--var key=value`). Type validation applied.
 
-### 11.4 Formula Discovery
+### 11.5 Formula Discovery
 
 Formulas are discovered from:
 1. `[formulas].dir` path (default: `.beads/formulas/`)
@@ -1043,7 +1406,17 @@ Each step in a molecule is a child bead with:
 | `tier` | Model tier hint: haiku, sonnet, opus |
 | `type` | "task" (default) or "wait" (polling step with backoff) |
 | `waits_for` | Dynamic wait conditions (e.g., "all-children") |
-| `backoff` | For wait-type steps: base, multiplier, max |
+| `backoff` | For wait-type steps: backoff configuration (see below) |
+
+**BackoffConfig** (for wait-type steps):
+
+```go
+type BackoffConfig struct {
+    Base       time.Duration // Initial wait duration (e.g., 10s)
+    Multiplier float64       // Backoff multiplier (e.g., 2.0)
+    Max        time.Duration // Maximum wait duration (e.g., 5m)
+}
+```
 
 ### 12.4 DAG Execution
 
@@ -1127,21 +1500,29 @@ gc sling gt-abc
 gc sling gt-abc crew
 gc sling gt-abc mayor
 
-# Project-scoped target (auto-spawn polecat)
+# Project-scoped target (auto-spawn polecat from name pool)
 gc sling gt-abc myproject
 
-# Specific named worker
+# Specific named worker (name from pool, e.g., "Toast" from mad-max theme)
 gc sling gt-abc myproject/Toast
+gc sling gt-abc myproject/polecats/Toast   # Explicit long form
 
 # Dog pool
 gc sling gt-abc deacon/dogs
 ```
 
+**Resolution pipeline:**
+1. Contains `/` → parse as `project/role/name` or `project/name`
+2. Single token → resolve against `[[agents]]` entries by name. If the workspace defines an agent named "mayor", that agent is the target. There are **no hardcoded role shortcuts** — all resolution is config-driven. (Gas Town compatibility mode auto-generates aliases from `gastown.toml` agent names.)
+3. If target session not found and target looks like a pool agent → auto-spawn fresh instance from name pool (default: auto-spawn; suppress with `--no-create`)
+4. **Cross-project guard:** bead's project must match target agent's project scope
+
 ### 14.4 Sling Flags
 
 | Flag | Description |
 |------|-------------|
-| `--create` | Create polecat if target doesn't exist |
+| `--create` | Create pool agent if target doesn't exist (default: true for pool targets) |
+| `--no-create` | Fail instead of auto-spawning if target doesn't exist |
 | `--force` | Ignore unread mail on target |
 | `--agent <preset>` | Override provider (e.g., `--agent gemini`) |
 | `--no-convoy` | Skip auto-convoy creation |
@@ -1193,15 +1574,50 @@ Gas Town has two distinct messaging mechanisms:
 | `gc nudge --if-fresh <target> "msg"` | Only nudge if session < 60s old |
 | `gc broadcast <message>` | Town-wide broadcast to all agents |
 
-### 15.4 Nudge Target Shortcuts
+### 15.4 Nudge Target Resolution
 
-| Shortcut | Resolves To |
-|----------|-------------|
-| `mayor` | `hq-mayor` session |
-| `deacon` | `hq-deacon` session |
-| `witness` | `gt-{project}-witness` session |
-| `refinery` | `gt-{project}-refinery` session |
-| `channel:<name>` | All members of named channel |
+Nudge targets resolve against `[[agents]]` entries by name — there are **no hardcoded shortcuts**. Resolution order:
+
+1. **Agent name** → match against `[[agents]]` entries (e.g., `gc nudge mayor` works if an agent named "mayor" exists in config)
+2. **`channel:<name>`** → all members of named channel (§15.6)
+3. **`<project>/<name>`** → project-scoped agent lookup
+
+The target is resolved to a tmux session name via the agent's `session.pattern` config. For example, an agent named "mayor" with `session.pattern = "hq-mayor"` resolves to tmux session `hq-mayor`. Gas Town's `gastown.toml` example defines these patterns, making `gc nudge mayor` resolve to `hq-mayor` — but this is config-driven, not hardcoded.
+
+### 15.5 DND (Do Not Disturb)
+
+Agents can enter DND mode to suppress incoming nudges. When DND is active, nudges are silently dropped unless `--force` is used.
+
+**DND is runtime state**, not configuration — it is set via CLI and stored in the agent registry (`.gc/agents/*.json`):
+
+| Command | Description |
+|---------|-------------|
+| `gc agent dnd <name> on` | Enable DND for agent |
+| `gc agent dnd <name> off` | Disable DND for agent |
+| `gc agent dnd <name>` | Toggle DND state |
+
+DND state is cleared on agent restart. Nudges suppressed by DND are not queued — they are lost. Use mail for messages that must survive DND.
+
+### 15.6 Channels
+
+Channels are named groups of agents that can be targeted as a single nudge destination. A nudge to `channel:<name>` is delivered to all member agents.
+
+**Channel configuration** in the workspace TOML:
+
+```toml
+[channels.workers]
+members = ["polecats", "crew"]    # Agent names (pools expand to all instances)
+
+[channels.monitors]
+members = ["witness", "deacon"]
+```
+
+**Rules:**
+1. Channel names must be unique within the workspace.
+2. Members reference agent names from `[[agents]]` entries.
+3. Pool agents (e.g., "polecats") expand to all running instances in the pool.
+4. Nudge to a channel delivers to all running members; stopped members are skipped.
+5. `gc broadcast` is equivalent to nudging all running agents — it does not use channels.
 
 ---
 
@@ -1251,7 +1667,34 @@ If so, rebuild from source:
 | `event` | Fire on specific event | `event = "bead.closed"` |
 | `manual` | Only fire when explicitly triggered | (no extra config) |
 
-### 16.3 Plugin Locations
+### 16.3 Plugin Execution Model
+
+The **plugin gate evaluator** (§7.1 control loop) periodically checks all registered plugins:
+
+```
+FOR each plugin in workspace + project plugin dirs:
+  IF gate condition met (cooldown elapsed, cron fired, event matched, condition true):
+    create wisp bead (type "wisp", ephemeral)
+    resolve target agent: first available pool agent, or spawn new if pool has capacity
+    hook wisp to target agent
+    nudge agent with plugin's Markdown body as prompt
+    ON completion: destroy wisp bead (ephemeral cleanup)
+    ON failure: publish EventPluginFailed, retry up to 2 times with exponential backoff
+```
+
+**Manual gate trigger:** `gc plugin run <name>` — bypasses gate condition and fires immediately.
+
+**Plugin CLI commands:**
+
+| Command | Description |
+|---------|-------------|
+| `gc plugin list` | List all discovered plugins with gate status |
+| `gc plugin run <name>` | Manually trigger a plugin (bypasses gate) |
+| `gc plugin disable <name>` | Disable a plugin (skip during evaluation) |
+| `gc plugin enable <name>` | Re-enable a disabled plugin |
+| `gc plugin status <name>` | Show last execution, next scheduled, gate state |
+
+### 16.4 Plugin Locations
 
 - **Workspace-level:** `plugins/` — applies to all projects
 - **Project-level:** `<project>/plugins/` — applies to specific project
@@ -1268,7 +1711,7 @@ The Gas City CLI is `gc`.
 # Workspace lifecycle
 gc init [--file ralph.toml|ccat.toml|gastown.toml]  # Init from example config
 gc init                                               # Interactive wizard
-gc start [--daemon]
+gc start [--daemon] [--config <path>]                 # Config flag (§3.1)
 gc stop [--force] [--drain-timeout 5m]
 gc status
 gc level                                              # Show capability level
@@ -1280,11 +1723,17 @@ gc agent stop <name>
 gc agent restart <name>
 gc agent attach <name>                                # tmux attach
 gc agent logs <name> [--follow]
+gc agent dnd <name> [on|off]                          # Toggle/set DND mode (§15.5)
+gc agent unquarantine <name>                          # Release from quarantine (§9.1)
 
 # Work dispatch
 gc sling <bead-or-formula> [target] [--var key=value]
-gc hook <bead-id>                                     # Attach to own hook
+gc hook                                               # Show hook status (bead + molecule)
+gc hook <bead-id>                                     # Attach bead to own hook
+gc hook --verbose                                     # Detailed hook view (DAG, dependencies)
+gc hook clear                                         # Remove bead from hook (unhook)
 gc handoff <bead-id>                                  # Hook + restart with fresh context
+gc done                                               # Signal work complete (push, MR, cleanup)
 
 # Molecule management
 gc mol status
@@ -1320,13 +1769,18 @@ gc mail mark-read <id>
 gc mail hook <mail-id>                                # Hook mail as assignment
 gc mail archive                                       # Archive old mail
 gc nudge <target> [message]
+gc nudge <target> -m "message"                        # Explicit message flag
+gc nudge <target> --stdin                             # Read nudge from stdin
+gc nudge --if-fresh <target> "msg"                    # Only nudge if session < 60s old
 gc broadcast <message>
 
 # Beads (task management)
-gc task list [--status=X]
-gc task create <title>
-gc task show <id>
-gc task ready                                         # List ready (unblocked) beads
+gc bead list [--status=X] [--type=X]                  # List beads with filters
+gc bead create <title> [--type=task]                   # Create a bead
+gc bead show <id> [--json]                            # Detailed bead view
+gc bead close <id> [--reason "..."]                   # Close/complete a bead
+gc bead ready                                         # List ready (unblocked) beads
+gc bead move <id> <target-prefix>                     # Move bead to different project
 
 # Monitoring / transparency
 gc dashboard                                          # Web UI
@@ -1334,11 +1788,15 @@ gc dashboard --tui                                    # Terminal UI
 gc activity [--follow]                                # Event stream
 gc stats                                              # Agent metrics
 
+# Session inspection
+gc seance <session-id>                                # Resume/inspect a predecessor's session
+gc seance --talk <session-id>                         # Interactive conversation with previous agent
+
 # Utility
 gc validate                                           # Config validation
 gc prime                                              # Render role prompt for current agent
 gc migrate [--dry-run]                                # Generate config from Gas Town workspace
-gc doctor                                             # Health checks
+gc doctor                                             # Health checks (config, providers, tmux, beads)
 gc config show                                        # Display resolved config
 gc test-provider <name>                               # Run conformance suite against a provider
 gc version
@@ -1375,19 +1833,69 @@ Created ralph.toml (Level 2 - Task Loop)
 Run `gc start` to begin.
 ```
 
+### 17.3 `gc done`
+
+The task completion command for all agent types. Behavior adapts based on agent lifecycle:
+
+**For ephemeral agents (polecats):**
+1. **Push** — commit and push all changes to the working branch
+2. **Merge request** — create MR/PR for the merge queue (unless `--no-merge`)
+3. **Close bead** — mark the hooked bead as closed
+4. **Cleanup** — destroy worktree, release name back to pool, terminate session
+
+**For persistent agents (crew, mayor, witness, refinery):**
+1. **Push** — commit and push all changes
+2. **Merge request** — create MR/PR if on a feature branch (skip if on main)
+3. **Close bead** — mark the hooked bead as closed
+4. **No cleanup** — session and workspace are preserved
+
+Exit codes communicate outcome to the orchestration layer:
+
+| Exit | Code | Meaning |
+|------|------|---------|
+| `COMPLETED` | 0 | Work finished successfully |
+| `ESCALATED` | 1 | Work needs human or senior agent review |
+| `DEFERRED` | 2 | Work paused, bead stays open |
+| `PHASE_COMPLETE` | 3 | Molecule step done, more steps remain |
+
+Exit codes are emitted by `gc done` only. Other `gc` commands use standard Unix exit codes (0 = success, 1 = error). The symbolic names are set as `GC_EXIT_REASON` environment variable for lifecycle handlers.
+
+### 17.4 `gc seance`
+
+Session inspection/resume command. Uses provider-specific resume capabilities (§2.8) to interact with a previous agent's conversation:
+
+```
+gc seance <session-id>                   # Read-only inspection of session history
+gc seance --talk <session-id>            # Interactive conversation with predecessor
+```
+
+For Claude Code, this uses `--fork-session --resume <id>` to create a read-only fork of the previous conversation. Useful for debugging stalled agents or understanding what a predecessor did.
+
 ---
 
 ## 18. Identity and Addressing
 
 ### 18.1 Address Format
 
-Gas City uses a hierarchical addressing scheme matching Gas Town's patterns:
+Gas City uses a hierarchical addressing scheme matching Gas Town's patterns.
 
+**Canonical (fully-qualified) format:**
 ```
 <workspace>/<agent-name>                    # Workspace-scoped
 <workspace>/<project>/<agent-name>          # Project-scoped
-<workspace>/<project>/<agent-name>[<idx>]   # Pool instance
+<workspace>/<project>/<pool>/<instance>     # Pool instance (named, e.g., "Toast")
 ```
+
+**CLI shorthand rules** (workspace prefix is implicit within a workspace):
+```
+mayor                     → <workspace>/mayor          (agent name lookup)
+gastown/witness           → <workspace>/gastown/witness (project/agent)
+gastown/Toast             → <workspace>/gastown/polecats/Toast (project/instance, pool inferred)
+gastown/polecats/Toast    → <workspace>/gastown/polecats/Toast (explicit)
+channel:workers           → expand to all channel members
+```
+
+The CLI always resolves shorthand against the current workspace's `[[agents]]` entries. Ambiguity (e.g., an agent named "gastown" and a project named "gastown") is resolved by checking agents first, then projects.
 
 ### 18.2 Gas Town Address Compatibility
 
@@ -1396,7 +1904,7 @@ Gas City uses a hierarchical addressing scheme matching Gas Town's patterns:
 | `mayor/` | `<workspace>/mayor` |
 | `deacon/` | `<workspace>/deacon` |
 | `<rig>/crew/<name>` | `<workspace>/<project>/<name>` |
-| `<rig>/polecats/<name>` | `<workspace>/<project>/polecats[<idx>]` |
+| `<rig>/polecats/<name>` | `<workspace>/<project>/polecats/<name>` |
 | `<rig>/witness` | `<workspace>/<project>/witness` |
 | `<rig>/refinery` | `<workspace>/<project>/refinery` |
 
@@ -1406,13 +1914,15 @@ The agent registry maps logical identities to runtime handles, persisted to `.gc
 
 ---
 
-## 19. Lifecycle Hooks
+## 19. Lifecycle Events
 
-### 19.1 Hook Events
+> **Terminology note:** This section covers lifecycle event handlers — shell commands triggered by agent lifecycle events. These are configured via `[agents.lifecycle]` in config. The term "hook" in the rest of this spec refers exclusively to bead hooks (attaching work to an agent's hook slot, §10.3). Provider-specific hooks (e.g., Claude Code's native hook system) are called "provider hooks" when disambiguation is needed.
 
-Hooks are shell commands triggered by lifecycle events:
+### 19.1 Lifecycle Event Handlers
 
-| Hook | Trigger | Template Variables |
+Lifecycle handlers are shell commands triggered by agent events:
+
+| Event | Trigger | Template Variables |
 |------|---------|-------------------|
 | `on_start` | Agent started | `{{.Agent}}`, `{{.Project}}` |
 | `on_stop` | Agent stopped | `{{.Agent}}`, `{{.Project}}` |
@@ -1422,7 +1932,74 @@ Hooks are shell commands triggered by lifecycle events:
 
 ### 19.2 Execution Model
 
-Hooks run as shell commands via `sh -c` with a default 30s timeout. They are executed by the hook executor, which is a critical event bus subscriber — hook failures are not silently dropped.
+Lifecycle handlers run as shell commands via `sh -c` with a default 30s timeout. They are executed by the lifecycle executor, which is a critical event bus subscriber — handler failures are not silently dropped.
+
+**Security note:** Template variables in lifecycle commands are shell-escaped before expansion to prevent injection. A task title containing `; rm -rf /` will be escaped to a safe string. See §20A for details.
+
+---
+
+## 20A. Security
+
+### 20A.1 Shell Injection Mitigation
+
+Lifecycle handlers (§19) execute shell commands with template variables expanded from bead metadata. Since bead titles and descriptions are user-supplied (and may originate from issue trackers), all template variables are shell-escaped before expansion using Go's `shellescape` package.
+
+**Escaping rules:**
+- **All** template variables (`{{.Agent}}`, `{{.Task}}`, `{{.TaskTitle}}`, and any custom variables from `[inputs]` or `[env]`) are passed through `shellescape.Quote()` before shell expansion.
+- This wraps values in single quotes and escapes embedded single quotes.
+- Example: a task title `fix bug; rm -rf /` becomes `'fix bug; rm -rf /'` — the semicolon is not interpreted as a command separator.
+
+**What is NOT escaped:**
+- The command template itself (the `on_start`, `on_stop`, etc. strings from config). These are trusted — they come from the workspace TOML, which is under the operator's control.
+- Environment variables set via `[agents.env]` — also operator-controlled config.
+
+### 20A.2 Secret Management
+
+Gas City does not provide a built-in secret store. Secrets are managed via:
+
+1. **Environment variables** in `[agents.env]` — suitable for API keys passed to providers.
+2. **Shell profile** — providers inherit the user's shell environment (e.g., `~/global_env.sh`).
+3. **Config file permissions** — workspace TOML files should be `chmod 600` in multi-user environments.
+
+**Secrets MUST NOT appear in:**
+- Bead metadata (stored in Dolt, visible to all agents)
+- Mail messages (stored in Dolt)
+- Websocket event streams (observable via dashboard)
+- Formula `[inputs]` defaults (committed to repo)
+
+**Streaming output redaction:** The websocket transparency stream (§7.4) may relay agent I/O that incidentally contains secrets (e.g., an agent printing an API key during debugging). The event bus does NOT perform automatic redaction — operators should be aware that raw agent output on the websocket is equivalent to watching the tmux session directly. A future enhancement could add configurable redaction patterns (`[daemon.redact_patterns]`), but v1 treats the websocket as a same-trust-level channel.
+
+### 20A.3 Websocket Authentication
+
+The daemon websocket endpoint (`ws://localhost:{port}`) is local-only by default:
+
+- **v1:** Listens on `127.0.0.1` only. No authentication required (same-user access model, like tmux).
+- **Future:** Token-based auth for remote dashboard access.
+
+The websocket streams all event bus traffic. Any process on the local machine can connect and observe agent activity, bead state changes, mail delivery, etc. This is by design — transparency is a core feature.
+
+### 20A.4 Tmux Session Access
+
+Tmux sessions are owned by the user running `gc start`. Standard Unix permissions apply:
+- Only the session owner can attach (`gc agent attach`).
+- Worktree directories inherit the parent repo's permissions.
+- Agent processes run as the invoking user — there is no privilege escalation.
+
+### 20A.5 Provider Permission Models
+
+Each provider has its own auto-approve mechanism (§2.4). These flags bypass the provider's built-in confirmation prompts, allowing autonomous operation. Operators should understand the implications:
+
+| Provider | Auto-approve Flag | Scope |
+|----------|------------------|-------|
+| `claude` | `--dangerously-skip-permissions` | All file/command operations |
+| `codex` | `--yolo` | All file/command operations |
+| `gemini` | `--approval-mode yolo` | All file/command operations |
+| `opencode` | env: `OPENCODE_PERMISSION={"*":"allow"}` | All tool calls |
+| `cursor` | `-f` | Force mode |
+| `auggie` | `--allow-indexing` | Indexing + file operations |
+| `amp` | `--dangerously-allow-all --no-ide` | All operations, headless |
+
+Using these flags is required for autonomous agent operation but means the agent can execute arbitrary shell commands and modify any file the user can access. This is the intended operating mode for Gas City agents.
 
 ---
 
@@ -1476,12 +2053,14 @@ Hooks run as shell commands via `sh -c` with a default 30s timeout. They are exe
 | Config parser | TOML parsing, level detection, validation, defaults | Filesystem (embed test TOML) |
 | Provider registry | Registration, lookup, auto-detection | None (pure logic) |
 | Pool manager | Scale up/down, min/max bounds, idle timeout | AgentProvider mock |
+| Name pool | Theme selection, allocation, release, overflow, reserved names | None (pure logic) |
+| Stale hook scanner | Session liveness check, age-based fallback, worktree safety | AgentProvider + TaskBackend mocks |
 | Task loop | Hook/claim cycle, mail check, poll interval | AgentProvider + TaskBackend mocks |
 | Startup sequencer | DAG ordering, parallel start, rollback | AgentProvider mock |
 | Event bus | Pub/sub, critical vs optional tiers, replay | None (pure concurrency) |
-| Formula parser | All 4 types, variable resolution, cycle detection | None (pure parsing) |
+| Formula parser | All 4 types, input validation, cycle detection | None (pure parsing) |
 | Molecule executor | DAG step ordering, ready detection, crash recovery | TaskBackend mock |
-| Hook executor | Template expansion, timeout, error propagation | EventBus (inject events) |
+| Lifecycle executor | Template expansion, timeout, error propagation | EventBus (inject events) |
 | Identity resolver | Address parsing, Gas Town compat | None (pure logic) |
 | Migration | Town→City conversion, edge cases, report | Filesystem (test fixtures) |
 
@@ -1505,15 +2084,19 @@ Hooks run as shell commands via `sh -c` with a default 30s timeout. They are exe
 | Provider roundtrip | Start → SendPrompt → ReadOutput → Stop |
 | Config → startup → shutdown | Parse TOML → start all → verify → stop all |
 | Ralph smoke test | Single agent processes one task end-to-end |
-| Agent Teams smoke test | Coordinator dispatches to worker pool |
+| Agent Teams smoke test | Coordinator dispatches to worker pool (named from pool) |
 | Formula → molecule → execute | Sling formula → molecule created → steps execute |
 | Convoy lifecycle | Create → track issues → auto-close |
+| Stale hook recovery | Agent crash → bead stays hooked → scan → unhook → re-claim |
+| Done exit flow | `gc done` → push → MR → close bead → cleanup worktree |
 | Migration test | Gas Town workspace → gc migrate → verify config |
 | Websocket streaming | Connect → receive events → verify catch-up replay |
 
 ---
 
 ## 22. Implementation Phases
+
+> **Note on event bus progression:** A minimal in-process event bus (pub/sub, no websocket, no replay) ships in Phase 1 as part of the controller. Lifecycle handlers (Phase 3) subscribe to this minimal bus. Phase 5 upgrades it with websocket streaming, ring buffer replay, and the dashboard consumer. §7/§8 describe the full system; earlier phases use a subset.
 
 ### Phase 1: Agent Protocol + Config (3 weeks)
 
@@ -1522,6 +2105,7 @@ Hooks run as shell commands via `sh -c` with a default 30s timeout. They are exe
 - TOML config parser with level detection and validation
 - Identity and addressing (agent registry, address resolution)
 - `gc init --file`, `gc start`, `gc stop`, `gc status`, `gc level`, `gc validate`
+- `gc config show`, `gc doctor`, `gc version`
 - Contract test suite (`gc test-provider`)
 
 ### Phase 2: Task System + Ralph (2 weeks)
@@ -1530,36 +2114,41 @@ Hooks run as shell commands via `sh -c` with a default 30s timeout. They are exe
 - Bead status lifecycle (open → hooked → closed)
 - Task loop with atomic Hook/Claim
 - Role system: TOML config loading, template rendering, override resolution
-- `gc task`, `gc prime`
+- `gc bead` (including `gc bead close`), `gc hook` (with --verbose), `gc prime`
 - Ralph config working end-to-end
 
 ### Phase 3: Pool + Messaging + Agent Teams (2 weeks)
 
-- Pool manager with min/max bounds
+- Pool manager with min/max bounds and name pool allocation (themed names)
 - Startup/shutdown sequencer with DAG ordering
 - Mail system (beads-backed, priority levels)
-- Nudge system (tmux send-keys)
-- Lifecycle hooks (event-driven shell commands)
-- `gc mail`, `gc nudge`, `gc broadcast`
+- Nudge system (tmux send-keys, DND support)
+- Channels (named agent groups for nudge targeting)
+- Lifecycle event handlers (shell commands on events)
+- `gc mail`, `gc nudge`, `gc broadcast`, `gc done`, `gc agent dnd`
 - ccat.toml (Agent Teams) working end-to-end
 
-### Phase 4: Formulas + Molecules + Sling (2 weeks)
+### Phase 4: Formulas + Molecules + Sling + Convoys (2 weeks)
 
 - Formula parser (all 4 types: workflow, convoy, expansion, aspect)
+- Formula presets (named leg/aspect selections)
 - Molecule instantiation (root bead + child step beads)
 - Molecule execution (DAG step ordering, ready detection)
+- Basic convoy creation and tracking (auto-convoy from sling)
 - Sling dispatch command
-- `gc formula`, `gc mol`, `gc sling`
+- `gc formula`, `gc mol`, `gc sling`, `gc convoy create`, `gc convoy status`
+- `gc handoff`
 
 ### Phase 5: Full Gas Town + Migration (3 weeks)
 
-- Convoy tracking system
+- Full convoy management (`gc convoy list`, `gc convoy check`, `gc convoy stranded`, `gc convoy close`)
 - Plugin system (Markdown + TOML frontmatter, gate types)
-- Health monitoring / patrol cycle
+- Health monitoring / patrol cycle with stale hook scanning
 - Event bus with websocket streaming
 - Dashboard (web + TUI)
 - Migration tooling
-- `gc convoy`, `gc dashboard`, `gc activity`, `gc migrate`
+- Session inspection (`gc seance`)
+- `gc bead move`, `gc dashboard`, `gc activity`, `gc stats`, `gc migrate`, `gc seance`
 - gastown.toml working end-to-end
 - All remaining providers: codex, gemini, opencode, cursor, auggie, amp
 
@@ -1569,7 +2158,7 @@ Hooks run as shell commands via `sh -c` with a default 30s timeout. They are exe
 
 | Exclusion | Rationale |
 |-----------|-----------|
-| Web dashboard (standalone) | Event bus + websocket provide the data API. Dashboard consumes it. Separate deliverable. |
+| Web dashboard (standalone, production-grade) | `gc dashboard` provides a dev/debug UI (§17.1, Phase 5). A production-grade standalone dashboard is a separate deliverable. |
 | Cloud/remote execution | v1 is local-only. All providers run locally. |
 | Multi-tenant isolation | One workspace per user. |
 | Agent marketplace | SDK provides config format; sharing is orthogonal. |
@@ -1609,7 +2198,16 @@ Enforced by serialized scale operations under mutex.
 
 If `StartWorkspace()` fails at agent `k` of `n`, agents `1..k-1` are stopped in reverse order. No orphaned agents after failed startup.
 
-### 24.5 Molecule DAG Correctness
+### 24.5 Name Pool Uniqueness
+
+For any pool within a project, no two running instances share the same name at time `t`:
+```
+∀i,j ∈ running_instances(pool, t): i ≠ j → name(i) ≠ name(j)
+```
+
+Enforced by the name pool allocator tracking in-use names. Names are released on instance destruction. All pool operations (scale-up, scale-down, name allocation, name release, `gc done` cleanup) are serialized through the controller (§7.5) to prevent races between concurrent sling commands, pool scaling, and agent cleanup.
+
+### 24.6 Molecule DAG Correctness
 
 A molecule step `s` with dependencies `D = {d1, d2, ...dk}` becomes ready if and only if all dependencies are complete:
 ```
@@ -1624,13 +2222,27 @@ ready(s) ⟺ ∀di ∈ D: status(di) = closed
 
 2. **Plugin system scope.** The plan includes plugins with gate types. Gas Town's plugin system may still be evolving. Confirm scope and gate type implementations before Phase 5.
 
-3. **Websocket protocol.** Define the exact message format for websocket streaming (JSON-lines? Protobuf?). JSON-lines is simplest and matches Gas Town's existing JSONL patterns.
+3. **Websocket protocol.** Define the exact message format for websocket streaming (JSON-lines? Protobuf?). JSON-lines is simplest and matches Gas Town's existing JSONL patterns. Also define the replay request protocol — how does a client request replay from a specific sequence ID after a disconnect? Consider promoting to a required spec item before Phase 5 (Codex audit recommendation).
 
-4. **Formula preset system.** Gas Town's convoy formulas support presets (e.g., `[presets.gate]` for light code review). Determine if presets are v1 or v2.
+4. ~~**Formula preset system.**~~ Resolved: presets are v1. Added to convoy schema (§11.2) as preconfigured leg selections.
 
-5. **Non-interactive mode for providers.** Several providers support non-interactive/batch modes (e.g., `codex exec`, `gemini -p`). Define when to use interactive vs batch mode.
+5. **Non-interactive mode for providers.** Several providers support non-interactive/batch modes (e.g., `codex exec`, `gemini -p`). Define when to use interactive vs batch mode. Gas Town implementation shows `NonInteractiveConfig` with `PromptFlag`, `OutputFlag`, and `Subcommand` fields per provider.
 
 6. **Config hot-reload.** Can you add agents to a running workspace? v1: no (restart required). v2: file watch + diff.
+
+7. **Log management.** The spec defines `gc agent logs <name>` but doesn't specify log storage location, rotation policy, or retention. Recommend `.gc/logs/` with configurable rotation.
+
+8. **Provider image support.** The `Prompt` struct supports `Images [][]byte` but most CLI providers are text-only. Define fallback behavior when a provider doesn't support image attachments (error vs silent drop vs text description).
+
+9. **Secret management in formulas.** Formula `[inputs]` values end up in bead metadata (Dolt). §20A.2 says secrets must not appear in bead metadata. Define a mechanism for environment-based secret injection that avoids persistence (e.g., `type = "secret"` inputs resolved from env vars at execution time, never stored).
+
+10. **Event durability.** The ring buffer (§8.2) provides in-memory replay but events are lost across controller restarts. Consider a durable event log (`.gc/events.jsonl` with rotation) for post-mortem analysis and historical transparency. This is important for the vision requirement of "historical data."
+
+11. **Provider capability negotiation.** `Prompt.Images` and `Prompt.Files` exist (§2.2) but most CLI providers are text-only. Define capability flags or optional interfaces (`SupportsImages() bool`, `SupportsFiles() bool`) and required fallback behavior (error vs transform-to-text vs drop-with-warning).
+
+12. **Worktree filesystem layout.** §2.3 and §3.2 enumerate `isolation` modes but don't specify the exact directory layout under `.gc/`, naming conventions for worktree branches, or cleanup procedures for ephemeral agents. Define before Phase 2.
+
+13. **`gc seance` provider abstraction.** §17.4 describes Claude-specific `--fork-session --resume` but this isn't captured in the `AgentProvider` interface or `ResumeConfig`. Formalize "session inspection" as an optional provider capability.
 
 ---
 
@@ -1640,30 +2252,41 @@ ready(s) ⟺ ∀di ∈ D: status(di) = closed
 |-------------------|-------------|--------|
 | Orchestration-builder toolkit | §1 Executive Summary | Covered |
 | Multiple town shapes via config | §5 Three Example Configs | ralph, ccat, gastown |
-| Progressive capability model | §4 Levels 0-7 | Covered |
+| Progressive capability model | §4 Levels 0-8 | Covered (plugins now Level 7) |
 | Reasonable defaults | §3.3 Defaults table | Every setting has default |
 | Full configurability surface | §6 Role System | TOML + templates + override resolution |
-| Roles external, not hardcoded | §6.1 Three-Part Role Stack | ZERO hardcoded roles |
-| Sandboxes, plugins, hooks | §16 Plugins, §19 Hooks, §3.2 isolation | Covered |
+| Roles external, not hardcoded | §6.1 Three-Part Role Stack, §14.3, §15.4 | ZERO hardcoded roles; sling/nudge resolve against config |
+| Sandboxes, plugins, lifecycle events | §16 Plugins, §19 Lifecycle Events, §3.2 isolation | Covered |
 | Uniform agent abstraction | §2 Agent Protocol | AgentProvider interface |
 | Same subsystems as GT, configurable | §10-16 | Beads, mail, nudge, formulas, molecules, convoys, plugins |
 | Daemon with websocket transparency | §7.4 Websocket Transparency | Streams all data types |
+| Worker naming (name pools) | §2.7 Pool Naming | Themed names matching Gas Town |
+| Failure recovery (stale hooks) | §9.3, §10.3 | Session liveness + worktree safety |
+| Complete CLI parity with GT | §17 CLI Design | done, seance, hook subcommands, task close |
 
 ## Appendix B: Gas Town Subsystem Coverage
 
 | Gas Town Subsystem | Spec Section | Notes |
 |-------------------|-------------|-------|
-| Agents (tmux sessions) | §2 Agent Protocol | All 7 providers |
-| Beads (Dolt task system) | §10 Task System | Beads-first |
+| Agents (tmux sessions) | §2 Agent Protocol | All 8 providers |
+| Beads (Dolt task system) | §10 Task System | Beads-first, failure recovery |
 | Mail (async messaging) | §15.1 Mail | Priority levels, bead-backed |
 | Nudge (tmux send-keys) | §15.1 Nudge | Synchronous delivery |
 | Roles (TOML + templates) | §6 Role System | Three-part stack |
-| Formulas (4 types) | §11 Formulas | Full schemas |
+| Formulas (4 types) | §11 Formulas | Full schemas, unified [inputs] |
 | Molecules (instantiated formulas) | §12 Molecules | DAG execution, step lifecycle |
 | Convoys (batch tracking) | §13 Convoys | Auto-close, stranded detection |
-| Sling (work dispatch) | §14 Sling | Unified dispatch command |
+| Sling (work dispatch) | §14 Sling | Unified dispatch, target resolution pipeline |
 | Plugins (Markdown + gates) | §16 Plugin System | 5 gate types |
-| Deacon patrol (health) | §9 Health Monitoring | Configurable patrol cycle |
-| Hooks (lifecycle events) | §19 Lifecycle Hooks | Shell commands on events |
+| Deacon patrol (health) | §9 Health Monitoring | Patrol cycle, stale hook scanning |
+| Lifecycle events | §19 Lifecycle Events | Shell commands on events |
 | Session management (tmux) | §7 Controller | Session patterns, crash recovery |
+| Controller/CLI contract | §7.5 | Single-writer via Unix socket, atomic writes |
 | Websocket streaming | §7.4, §8.2 | Historical + real-time |
+| Name pool (worker naming) | §2.7 Pool Naming | Themed names, allocation/release |
+| Resume (session continuity) | §2.8 Resume Capabilities | Provider-specific, separate from crash recovery |
+| Wisps (ephemeral beads) | §10.2 Bead Types | Ephemeral beads for patrol cycles, transient ops |
+| Gates (async coordination) | §10.2 Bead Types | Park/resume agents on conditions |
+| Boot (deacon watchdog) | §6.5 Role Reference | Watchdog's watchdog |
+| Done (task exit flow) | §17.3 `gc done` | Push, MR, close, cleanup (all agent types) |
+| Seance (session inspection) | §17.4 `gc seance` | Fork/resume predecessor sessions |

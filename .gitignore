@@ -60,3 +60,6 @@ settings/
 .events.jsonl
 .sqlhistory
 .fork-integration.json
+
+# working folder -- added by csells
+tmp/
