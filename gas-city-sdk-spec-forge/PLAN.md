@@ -1,9 +1,12 @@
 # Gas City SDK — Technical Specification
 
-> **Version:** 0.2.0
+> **Version:** 0.5.0
 > **Date:** 2026-02-14
-> **Status:** Planning (Spec-Forge Stage 3)
+> **Status:** Planning (Spec-Forge Stage 3, Round 3 integrated)
 > **Source:** Independent spec-forge pipeline — research-notes.md + ideas-ranked.md
+> **Review Round 1:** Codex (gpt-5.3), Gemini, Claude — feedback integrated
+> **Review Round 2:** Codex (gpt-5.3), Gemini, Claude — feedback integrated
+> **Review Round 3:** Codex (gpt-5.3), Gemini, Claude — feedback integrated (converged)
 
 ---
 
@@ -15,15 +18,19 @@ Gas City is an **orchestration-builder SDK** that extracts Gas Town's hardcoded 
 
 **The core insight:** Orchestration is composable. Work tracking, messaging, health monitoring, task dispatch, and merge processing are independent capabilities that happen to be welded together in Gas Town. Separating them into composable units, each accessible through a uniform Agent Runtime interface, creates a toolkit that can express Gas Town (and any other topology) as a configuration.
 
+**The positioning:** Gas City is the "Level 8" — for users who have outgrown any single orchestrator and want to build their own. Gas Town becomes one possible configuration of Gas City, alongside Ralph, Agent Teams, and any custom topology the user designs.
+
 **What this spec covers:**
-- The Agent Runtime abstraction (the foundational interface)
+- The Agent Runtime abstraction (the foundational interface — the uniform "factory worker" abstraction)
 - A progressive capability model (Levels 0-7) where each level adds one composable capability
 - Three milestone configurations: Ralph, Agent Teams, Gas Town
+- Custom roles, coordination rules, and worker instructions — all externalized in config and prompts
 - Config schema (`gas-city.toml`) with full data structures
-- Startup/shutdown sequencing with formal ordering guarantees
-- Migration from existing Gas Town workspaces
+- Startup/shutdown sequencing with DAG-based dependency ordering
+- Extensibility: sandboxes (isolation modes), plugins (adapter registry), hooks (lifecycle events)
+- Migration from existing Gas Town workspaces with detailed reporting
 - CLI design (`gc` commands)
-- Testing strategy with contract tests per adapter
+- Testing strategy with contract tests per adapter (exposed via `gc test-adapter`)
 
 **What this spec does NOT cover:**
 - Web dashboard UI (future work; the SDK provides the data API)
@@ -63,6 +70,7 @@ type RuntimeAdapter interface {
 
     // Work assignment
     Assign(handle AgentHandle, task TaskDescriptor) error
+    WaitForResult(ctx context.Context, handle AgentHandle) (TaskResult, error)  // Blocks until task completes or ctx expires
     Nudge(handle AgentHandle, message string) error
     GetState(handle AgentHandle) (AgentState, error)
 
@@ -80,17 +88,98 @@ type RuntimeAdapter interface {
     Attach(handle AgentHandle) error
     Detach(handle AgentHandle) error
 }
+
+// ReadinessProbe is an optional interface adapters can implement
+// to provide explicit readiness checking beyond simple process liveness.
+type ReadinessProbe interface {
+    IsReady(handle AgentHandle) (bool, error)
+    WaitReady(ctx context.Context, handle AgentHandle) error
+}
+
+// Adopter is an optional interface for crash recovery.
+// Adapters that can reconnect to a running process after a controller crash
+// (e.g., tmux sessions, Docker containers) implement this interface.
+// Adapters that lose their connection on crash (e.g., subprocess pipes) do NOT
+// implement this — their agents will be restarted instead.
+type Adopter interface {
+    Adopt(ctx context.Context, identity AgentIdentity, metadata map[string]string) (AgentHandle, error)
+}
 ```
+
+**Interface design rationale:** The interface is intentionally broad (lifecycle + work + I/O + health) because all these concerns are coupled at the transport layer (tmux, subprocess, docker). Splitting into sub-interfaces would create combinatorial explosion for adapter authors. Instead, optional capabilities (Attach, ReadinessProbe, Adopter) use Go's interface assertion pattern: `if probe, ok := adapter.(ReadinessProbe); ok { ... }`.
+
+### 2.2.1 Agent Task Protocol (Completion Detection)
+
+`WaitForResult()` blocks until a task completes and returns a `TaskResult`. But how does an adapter *know* the task is done? The SDK defines three completion modes, configured per-agent:
+
+```toml
+[agents.runtime_config]
+completion_mode = "prompt"    # "file", "prompt", or "exit"
+```
+
+**Mode 1: `file` (cooperative agents)**
+The agent writes a result file to `<workdir>/.gc/result-<task-id>.json` when done. The adapter watches for this file (via `fsnotify` or polling). The file conforms to the `TaskResult` JSON schema. This is the most reliable mode and the recommended default for custom adapters.
+
+**Mode 2: `prompt` (interactive agents — default for `claude-code`)**
+The adapter detects the agent returning to an idle prompt after receiving a task. For `claude-code`, this means the tmux pane shows a prompt indicator. For other interactive CLIs, the adapter watches stdout for a configurable prompt pattern. This is a heuristic and may produce false positives if the agent prints a prompt-like string mid-task.
+
+**Mode 3: `exit` (one-shot agents — default for `codex`, `subprocess`)**
+The agent process exits after completing the task. Exit code 0 = Completed, non-zero = Failed. Stdout is captured as `TaskResult.Output`. Artifacts are detected by diffing the working directory before and after execution.
+
+```go
+func (a *SubprocessAdapter) WaitForResult(ctx context.Context, handle AgentHandle) (TaskResult, error) {
+    cmd := a.getCmd(handle.ID)
+    err := cmd.Wait()  // Blocks until process exits
+
+    output, _ := a.readAllOutput(handle.ID)
+    artifacts := a.detectChangedFiles(handle)
+
+    result := TaskResult{
+        TaskID:    handle.Metadata["current_task"],
+        Output:    output,
+        Artifacts: artifacts,
+    }
+
+    if err != nil {
+        result.Status = StatusFailed
+        result.Error = err.Error()
+    } else {
+        result.Status = StatusCompleted
+    }
+    return result, nil
+}
+```
+
+The completion mode is part of the adapter contract: each built-in adapter has a default mode, and the contract tests verify it works correctly.
 
 ### 2.3 Core Data Structures
 
 ```go
-// AgentHandle is an opaque reference to a running agent instance.
+// AgentIdentity is the stable, logical identity of an agent.
+// It persists across restarts and is used for addressing/messaging.
+type AgentIdentity struct {
+    Workspace string  // Workspace name
+    Project   string  // Project name (empty for workspace-scoped)
+    Name      string  // Agent name from config (e.g., "coordinator")
+    Instance  int     // Pool instance index (0 for non-pooled agents)
+}
+
+func (id AgentIdentity) String() string {
+    if id.Project == "" {
+        return fmt.Sprintf("%s/%s", id.Workspace, id.Name)
+    }
+    if id.Instance > 0 {
+        return fmt.Sprintf("%s/%s/%s[%d]", id.Workspace, id.Project, id.Name, id.Instance)
+    }
+    return fmt.Sprintf("%s/%s/%s", id.Workspace, id.Project, id.Name)
+}
+
+// AgentHandle is a transient reference to a running agent instance.
+// A new handle is created on each Start(). The Identity persists.
 type AgentHandle struct {
-    ID        string            // Unique ID for this instance (UUID)
-    Agent     string            // Agent name from config (e.g., "coder")
+    ID        string            // Unique ID for this runtime instance (UUID)
+    Identity  AgentIdentity     // Logical identity (stable across restarts)
     Runtime   string            // Runtime adapter name (e.g., "claude-code")
-    Project   string            // Project scope (empty for workspace-scoped)
     StartedAt time.Time
     PID       int               // OS process ID (0 if not applicable)
     Metadata  map[string]string // Runtime-specific metadata
@@ -98,25 +187,64 @@ type AgentHandle struct {
 
 // AgentConfig is the resolved config for starting an agent.
 type AgentConfig struct {
-    Name          string
-    Role          string
-    Runtime       string
-    Project       string            // Empty for workspace scope
-    Command       string            // Primary command (e.g., "claude")
-    Args          []string
-    Env           map[string]string
-    WorkDir       string
-    SystemPrompt  string            // Path or inline prompt
-    NudgePrompt   string            // Initial message to send
-    RuntimeConfig map[string]any    // Adapter-specific settings
+    Name           string
+    Role           string
+    Runtime        string
+    Project        string            // Empty for workspace scope
+    Command        string            // Primary command (e.g., "claude")
+    Args           []string
+    Env            map[string]string
+    WorkDir        string
+    SystemPrompt   string            // Path or inline prompt
+    NudgePrompt    string            // Initial message to send
+    CompletionMode string            // "file", "prompt", or "exit"
+    RuntimeConfig  map[string]any    // Adapter-specific settings
+    DependsOn      []string          // Agent names that must start first
+    Ephemeral      bool              // Created/destroyed per-task
+    Isolation      string            // "none", "worktree", "directory", "container"
+    Pool           *PoolConfig       // Pool sizing (nil = no pool)
+    Loop           *LoopConfig       // Task loop config (nil = no loop)
+    Health         *HealthConfig     // Health check config
+    Hooks          *HookConfig       // Lifecycle hooks
+}
+
+type PoolConfig struct {
+    Min         int
+    Max         int
+    IdleTimeout time.Duration
+}
+
+type LoopConfig struct {
+    Enabled        bool
+    AutoExecute    bool              // GUPP: auto-start on work
+    ContextPolicy  string            // "clear", "keep", "summarize"
+    PollInterval   time.Duration
+}
+
+type HealthConfig struct {
+    PingTimeout         time.Duration
+    StuckThreshold      time.Duration
+    ConsecutiveFailures int
+    KillCooldown        time.Duration
+}
+
+type HookConfig struct {
+    OnStart      string
+    OnStop       string
+    OnTaskStart  string
+    OnTaskEnd    string
+    Critical     bool              // Critical hooks block; best-effort hooks are async
 }
 
 // AgentState represents the current state of an agent.
 type AgentState struct {
-    Status     AgentStatus // Running, Idle, Working, Stalled, Stopped
-    CurrentTask string     // Task ID being worked on (empty if idle)
-    LastActivity time.Time
-    Uptime      time.Duration
+    Status             AgentStatus // Running, Idle, Working, Stalled, Stopped
+    CurrentTask        string      // Task ID being worked on (empty if idle)
+    LastActivity       time.Time
+    LastProgressUpdate time.Time   // When agent last reported progress
+    ProgressMessage    string      // e.g., "compiling foo.rs", "running tests"
+    WorkStartedAt      time.Time   // When current task was assigned
+    Uptime             time.Duration
 }
 
 type AgentStatus int
@@ -142,6 +270,9 @@ type AgentMetrics struct {
     TotalUptime     time.Duration
     LastPingLatency time.Duration
     MemoryUsageMB   float64 // 0 if not measurable
+    TokensIn        int     // Input tokens consumed (0 if runtime doesn't report)
+    TokensOut       int     // Output tokens generated
+    EstimatedCostUSD float64 // Estimated cost in USD (0 if not available)
 }
 
 // TaskDescriptor describes a task to assign to an agent.
@@ -151,8 +282,19 @@ type TaskDescriptor struct {
     Description string
     Priority    int
     Labels      []string
-    Branch      string // Git branch to work on
+    Branch      string   // Git branch to work on
     Files       []string // Relevant files (hint for the agent)
+}
+
+// TaskResult normalizes completion data across runtimes.
+// Every adapter's WaitForResult() returns this structure.
+type TaskResult struct {
+    TaskID    string       `json:"task_id"`
+    Status    TaskStatus   `json:"status"`    // Completed, Failed
+    Output    string       `json:"output"`    // Summary text
+    Artifacts []string     `json:"artifacts"` // File paths created/modified
+    Metrics   AgentMetrics `json:"metrics"`   // Cost, tokens, time
+    Error     string       `json:"error,omitempty"`
 }
 ```
 
@@ -171,15 +313,17 @@ type TaskDescriptor struct {
 
 Every RuntimeAdapter implementation MUST satisfy these properties:
 
-**P1 — Idempotent Stop:** Calling `Stop(handle)` on an already-stopped agent returns `nil`, not an error. This enables retry-safe shutdown sequences.
+**P1 — Idempotent Stop:** Calling `Stop(handle)` on an already-stopped agent returns `nil`, not an error. The adapter distinguishes "already stopped" from "never existed" by tracking handle IDs in an internal registry. This enables retry-safe shutdown sequences.
 
-**P2 — Liveness After Start:** If `Start(ctx, config)` returns `(handle, nil)`, then `IsRunning(handle)` returns `true` within the agent's configured `ping_timeout`. Formally: `Start(cfg) = (h, nil) ⟹ ∃t ≤ ping_timeout: IsRunning(h) @ t = true`.
+**P2 — Liveness After Start:** If `Start(ctx, config)` returns `(handle, nil)`, then `IsRunning(handle)` returns `true` within the agent's configured `ping_timeout`. Formally: `Start(cfg) = (h, nil) => IsRunning(h) @ t = true` for some `t <= ping_timeout`.
 
 **P3 — Graceful Degradation:** If `SupportsAttach()` returns `false`, then `Attach(handle)` returns `ErrNotSupported` (not a panic, not a hang).
 
-**P4 — Bounded Resource Cleanup:** `Stop(handle, graceful=false)` guarantees all OS resources (processes, file descriptors, temp directories) are released within `kill_cooldown`. Formally: let `R(h, t)` be the set of OS resources held by handle `h` at time `t`. Then `Stop(h, false) @ t₀ ⟹ R(h, t₀ + kill_cooldown) = ∅`.
+**P4 — Bounded Resource Cleanup:** `Stop(handle, graceful=false)` guarantees all OS resources (processes, file descriptors, temp directories) are released within `kill_cooldown`. Formally: let `R(h, t)` be the set of OS resources held by handle `h` at time `t`. Then `Stop(h, false) @ t0 => R(h, t0 + kill_cooldown) = {}`.
 
 **P5 — Thread Safety:** Concurrent calls to any combination of `Nudge()`, `CaptureOutput()`, `ReadOutput()`, `GetState()`, and `Ping()` on the same handle are safe. Adapters MUST use internal synchronization (mutexes or channels).
+
+**P6 — Start Uniqueness:** Calling `Start()` with the same config creates a new, independent agent instance with a unique handle ID. Two concurrent `Start()` calls never return the same handle.
 
 ### 2.6 The `claude-code` Adapter Implementation Map
 
@@ -192,23 +336,61 @@ This adapter wraps Gas Town's existing tmux integration:
 | `Stop(graceful=false)` | `tmux.KillSessionWithProcesses()` | `kill -9` all pane PIDs + `tmux kill-session` |
 | `IsRunning()` | `tmux.HasSession() && tmux.IsAgentRunning()` | Check tmux session exists AND agent process is alive in pane |
 | `Assign()` | Write task to agent's bead hook | Create/update the agent's hooked bead, then `Nudge()` |
+| `WaitForResult()` | Poll `GetState()` until idle or stalled | Loop until task completes, then read output and construct `TaskResult` |
 | `Nudge()` | `NudgeSession()` | `tmux.SendKeys()` with literal mode, debounce, separate Enter |
 | `GetState()` | Read agent's hooked bead | Query beads DB for agent's current assignment |
 | `SendInput()` | `tmux.SendKeys()` | Raw text input to tmux pane |
 | `CaptureOutput()` | `tmux.CapturePane()` | Return piped output from `tmux capture-pane -p` |
 | `ReadOutput()` | `tmux.CapturePane()` | Snapshot (non-streaming) version |
-| `Ping()` | Capture-pane + prompt detection | Read pane output, detect prompt indicator (e.g., `$`, `❯`) |
+| `Ping()` | Capture-pane + prompt detection | Read pane output, detect prompt indicator (e.g., `$`, `>`) |
 | `Attach()` | `tmux.AttachSession()` | `tmux attach-session -t <name>` |
+
+The `claude-code` adapter also implements `ReadinessProbe`:
+
+```go
+func (a *ClaudeCodeAdapter) IsReady(handle AgentHandle) (bool, error) {
+    output, err := a.ReadOutput(handle)
+    if err != nil {
+        return false, err
+    }
+    return containsPrompt(output), nil
+}
+
+func (a *ClaudeCodeAdapter) WaitReady(ctx context.Context, handle AgentHandle) error {
+    ticker := time.NewTicker(2 * time.Second)
+    defer ticker.Stop()
+    for {
+        select {
+        case <-ctx.Done():
+            return ctx.Err()
+        case <-ticker.C:
+            ready, err := a.IsReady(handle)
+            if err != nil {
+                return err
+            }
+            if ready {
+                return nil
+            }
+        }
+    }
+}
+```
 
 ### 2.7 The `subprocess` Adapter Implementation
 
 Generic adapter for wrapping any CLI tool:
 
 ```go
-type SubprocessAdapter struct{}
+type SubprocessAdapter struct{
+    DefaultCommand string  // Fallback when AgentConfig.Command is empty
+}
 
 func (s *SubprocessAdapter) Start(ctx context.Context, config AgentConfig) (AgentHandle, error) {
-    cmd := exec.CommandContext(ctx, config.Command, config.Args...)
+    command := config.Command
+    if command == "" {
+        command = s.DefaultCommand  // Use adapter default (e.g., "codex", "gemini")
+    }
+    cmd := exec.CommandContext(ctx, command, config.Args...)
     cmd.Dir = config.WorkDir
     cmd.Env = mergeEnv(os.Environ(), config.Env)
 
@@ -222,7 +404,7 @@ func (s *SubprocessAdapter) Start(ctx context.Context, config AgentConfig) (Agen
 
     handle := AgentHandle{
         ID:        uuid.New().String(),
-        Agent:     config.Name,
+        Identity:  AgentIdentity{Name: config.Name},
         Runtime:   "subprocess",
         PID:       cmd.Process.Pid,
         StartedAt: time.Now(),
@@ -248,21 +430,45 @@ func (s *SubprocessAdapter) IsRunning(handle AgentHandle) bool {
 }
 
 func (s *SubprocessAdapter) SupportsAttach() bool { return false }
+
+// mergeEnv: system env vars form the base, config.Env overrides.
+func mergeEnv(systemEnv []string, configEnv map[string]string) []string {
+    envMap := make(map[string]string)
+    for _, pair := range systemEnv {
+        parts := strings.SplitN(pair, "=", 2)
+        if len(parts) == 2 {
+            envMap[parts[0]] = parts[1]
+        }
+    }
+    for k, v := range configEnv {
+        envMap[k] = v
+    }
+    result := make([]string, 0, len(envMap))
+    for k, v := range envMap {
+        result = append(result, k+"="+v)
+    }
+    return result
+}
 ```
 
 ### 2.8 Adapter Registry
 
 ```go
-var adapterRegistry = map[string]RuntimeAdapter{
-    "claude-code": &ClaudeCodeAdapter{},
-    "codex":       &SubprocessAdapter{DefaultCommand: "codex"},
-    "gemini-cli":  &SubprocessAdapter{DefaultCommand: "gemini"},
-    "agent-sdk":   &AgentSDKAdapter{},
-    "subprocess":  &SubprocessAdapter{},
-    "docker":      &DockerAdapter{},
-}
+var (
+    adapterMu       sync.RWMutex
+    adapterRegistry = map[string]RuntimeAdapter{
+        "claude-code": &ClaudeCodeAdapter{},
+        "codex":       &SubprocessAdapter{DefaultCommand: "codex"},
+        "gemini-cli":  &SubprocessAdapter{DefaultCommand: "gemini"},
+        "agent-sdk":   &AgentSDKAdapter{},
+        "subprocess":  &SubprocessAdapter{},
+        "docker":      &DockerAdapter{},
+    }
+)
 
 func GetAdapter(name string) (RuntimeAdapter, error) {
+    adapterMu.RLock()
+    defer adapterMu.RUnlock()
     adapter, ok := adapterRegistry[name]
     if !ok {
         return nil, fmt.Errorf("unknown runtime adapter: %q", name)
@@ -271,7 +477,36 @@ func GetAdapter(name string) (RuntimeAdapter, error) {
 }
 
 func RegisterAdapter(name string, adapter RuntimeAdapter) {
+    adapterMu.Lock()
+    defer adapterMu.Unlock()
     adapterRegistry[name] = adapter
+}
+```
+
+### 2.9 Runtime Auto-Detection
+
+When `runtime` is omitted from an agent config, the SDK detects the available runtime:
+
+```go
+func DetectRuntime() string {
+    // 1. Check for claude binary
+    if _, err := exec.LookPath("claude"); err == nil {
+        return "claude-code"
+    }
+    // 2. Check for codex binary
+    if _, err := exec.LookPath("codex"); err == nil {
+        return "codex"
+    }
+    // 3. Check for gemini binary
+    if _, err := exec.LookPath("gemini"); err == nil {
+        return "gemini-cli"
+    }
+    // 4. Check for docker
+    if _, err := exec.LookPath("docker"); err == nil {
+        return "docker"
+    }
+    // 5. Fallback
+    return "subprocess"
 }
 ```
 
@@ -284,9 +519,13 @@ func RegisterAdapter(name string, adapter RuntimeAdapter) {
 - **Format:** TOML (consistent with Gas Town's formula system)
 - **File:** `gas-city.toml` at the workspace root
 - **Detection logic:**
-  1. `gas-city.toml` exists → Gas City mode
-  2. `mayor/town.json` exists without `gas-city.toml` → Gas Town compatibility mode
-  3. Neither exists → fresh workspace, `gc init` required
+  1. `gas-city.toml` exists -> Gas City mode
+  2. `mayor/town.json` exists without `gas-city.toml` -> Gas Town compatibility mode
+  3. Neither exists -> fresh workspace, `gc init` required
+
+- **Environment variable expansion:** Values in `env` maps support `${VAR}` expansion from the host environment and optional `.env` files in the workspace root. API keys and secrets should use this mechanism rather than being hardcoded in `gas-city.toml`.
+
+- **TOML ordering note:** Sub-tables like `[agents.pool]` and `[agents.health]` attach to the most recently declared `[[agents]]` entry. Each agent's sub-tables must appear immediately after its `[[agents]]` header and before the next `[[agents]]` header. The config validator detects and reports orphaned sub-tables.
 
 ### 3.2 Full Schema
 
@@ -300,18 +539,33 @@ theme = "default"               # "default" or "gas-town" (enables GT naming in 
 # === LEVEL 0: Agent Runtime ===
 [[agents]]
 name = "string"                 # Required. Agent identifier (unique within workspace).
-runtime = "string"              # Runtime adapter: "claude-code", "codex", "agent-sdk", "subprocess", "docker"
-                                # Omit for auto-detection.
+runtime = "string"              # Runtime adapter: "claude-code", "codex", "agent-sdk",
+                                # "subprocess", "docker"
+                                # If omitted, auto-detected:
+                                #   1. Check for `claude` binary -> "claude-code"
+                                #   2. Check for `codex` binary -> "codex"
+                                #   3. Check for `gemini` binary -> "gemini-cli"
+                                #   4. Check for `docker` binary -> "docker"
+                                #   5. Fallback -> "subprocess"
 role = "worker"                 # "coordinator", "supervisor", "observer", "integrator",
                                 # "worker", "agent", "service", or any custom string
 scope = "project"               # "workspace" (one total) or "project" (one per project)
 ephemeral = false               # Whether this agent is created/destroyed per-task
-isolation = "worktree"          # "none", "worktree", "directory", "container"
+isolation = "worktree"          # Isolation strategy:
+                                # "none"      - Runs in workspace root (simple, shared state)
+                                # "worktree"  - Git worktree (Gas Town default, branch isolation)
+                                # "directory" - Copy of files to temp dir (no git overhead)
+                                # "container" - Docker/OCI container (strongest isolation)
+depends_on = []                 # Agent names that must start before this one
 
 [agents.runtime_config]         # Adapter-specific settings
 command = "claude"              # Command to run
 args = ["--dangerously-skip-permissions"]
-env = { KEY = "VALUE" }         # Extra env vars for the runtime
+env = { KEY = "${MY_SECRET}" }  # Extra env vars (supports ${VAR} expansion)
+completion_mode = "prompt"      # How task completion is detected:
+                                # "file"   - Agent writes .gc/result-<task-id>.json (recommended)
+                                # "prompt" - Adapter scans output for completion pattern
+                                # "exit"   - Process exit = task done (subprocess only)
 resume_flag = "--resume"        # How this runtime resumes sessions
 resume_style = "flag"           # "flag" or "subcommand"
 
@@ -323,7 +577,10 @@ idle_timeout = "5m"             # Time before idle instances are killed
 [agents.loop]                   # Task loop configuration
 enabled = false
 auto_execute = false            # GUPP: auto-start when work appears
-clear_context = false           # Clear agent context between tasks
+context_policy = "keep"         # Context management between tasks:
+                                # "clear"     - Full reset, start fresh (safest)
+                                # "keep"      - Retain full context (risks overflow)
+                                # "summarize" - Summarize before next task (balanced)
 poll_interval = "10s"           # How often to check for new tasks
 
 [agents.health]                 # Health check configuration
@@ -382,40 +639,49 @@ auto_track = false              # Auto-create batches for multi-task dispatches
 
 ### 3.3 Progressive Level Detection
 
-The config parser determines the workspace's capability level:
+The config parser determines the workspace's capability level. Each level requires the previous level as a prerequisite (monotonic progression):
 
 ```go
 func DetectLevel(cfg *WorkspaceConfig) int {
-    level := 0
-    if len(cfg.Agents) > 0 {
-        level = 0 // Agent Runtime
+    if cfg.Agents == nil || len(cfg.Agents) == 0 {
+        return -1 // Invalid: no agents
     }
+
+    level := 0 // Level 0: Agent Runtime (agents exist)
+
     if cfg.Tasks != nil && len(cfg.Projects) > 0 {
-        level = 1 // Work Tracking
+        level = 1 // Level 1: Work Tracking
     }
-    if hasLoopEnabled(cfg) {
-        level = 2 // Task Loop (Ralph shape)
+
+    if level >= 1 && hasAgentWithLoop(cfg) {
+        level = 2 // Level 2: Task Loop (Ralph shape)
     }
-    if hasPooledWorkers(cfg) || hasCoordinator(cfg) {
-        level = 3 // Worker Pool (Agent Teams shape)
+
+    if level >= 2 && (hasPooledWorkers(cfg) || hasCoordinator(cfg)) {
+        level = 3 // Level 3: Worker Pool (Agent Teams shape)
     }
-    if cfg.Messaging != nil {
-        level = 4 // Inter-Agent Messaging
+
+    if level >= 3 && cfg.Messaging != nil {
+        level = 4 // Level 4: Inter-Agent Messaging
     }
-    if cfg.Workflows != nil {
-        level = 5 // Workflow Templates
+
+    if level >= 4 && cfg.Workflows != nil {
+        level = 5 // Level 5: Workflow Templates
     }
-    if hasSupervisor(cfg) {
-        level = 6 // Monitoring
+
+    if level >= 5 && hasSupervisor(cfg) {
+        level = 6 // Level 6: Monitoring
     }
-    if len(cfg.Projects) >= 2 && hasProjectScopedAgents(cfg) {
-        level = 7 // Full Orchestration (Gas Town shape)
+
+    if level >= 6 && len(cfg.Projects) >= 2 && hasProjectScopedAgents(cfg) {
+        level = 7 // Level 7: Full Orchestration (Gas Town shape)
     }
+
     return level
 }
 ```
 
-**Monotonicity invariant:** Adding a config section never breaks lower-level functionality. Formally: if config `C` is valid at level `n`, then `C ∪ {new_section}` is valid at level `n` or higher. The parser validates this: it never rejects a config that was valid before adding a section.
+**Monotonicity invariant:** Each level check is guarded by `level >= n-1`, ensuring levels can only progress forward. Adding a config section never breaks lower-level functionality. Formally: if config `C` is valid at level `n`, then `C U {new_section}` is valid at level `n` or higher.
 
 ### 3.4 Config Validation Rules
 
@@ -424,10 +690,12 @@ func DetectLevel(cfg *WorkspaceConfig) int {
 | Agent names unique | No duplicate `agents.name` | "duplicate agent name: X" |
 | Pool only on ephemeral | `agents.pool` requires `ephemeral = true` | "pool config requires ephemeral = true" |
 | Scope consistency | `scope = "project"` requires `[projects]` | "project-scoped agent X requires at least one project" |
-| Runtime exists | `agents.runtime` in adapter registry | "unknown runtime: X" |
+| Runtime exists | `agents.runtime` in adapter registry (or omit for auto-detect) | "unknown runtime: X" |
 | Backend exists | `tasks.backend` in backend registry | "unknown task backend: X" |
 | Coordinator limit | At most 1 coordinator per workspace | "multiple coordinators not supported" |
 | Supervisor limit | At most 1 supervisor per workspace | "multiple supervisors not supported" |
+| Dependency validity | `depends_on` references existing agent names | "agent X depends on unknown agent Y" |
+| Dependency acyclic | `depends_on` graph has no cycles | "dependency cycle: X -> Y -> X" |
 
 ---
 
@@ -455,7 +723,7 @@ runtime = "claude-code"
 [agents.loop]
 enabled = true
 auto_execute = true
-clear_context = true
+context_policy = "clear"
 poll_interval = "30s"
 ```
 
@@ -463,35 +731,40 @@ poll_interval = "30s"
 
 ```
 LOOP:
-  tasks = taskBackend.ListReady(filter: {assignee: self.name})
+  tasks = taskBackend.List(filter: {
+    status: Ready,
+    claimableBy: self.name,  // Matches tasks assigned to self, self's pool, or unassigned
+    sortBy: "priority",
+    sortOrder: "desc"
+  })
   if len(tasks) == 0:
     sleep(poll_interval)
     goto LOOP
   task = tasks[0]  // highest priority
-  taskBackend.SetStatus(task.id, IN_PROGRESS)
+  ok = taskBackend.Claim(task.id, self.identity)  // Atomic claim (uses identity string)
+  if !ok:
+    goto LOOP  // Another agent claimed it first
   runtime.Assign(self.handle, task)
   WAIT_COMPLETION:
-    state = runtime.GetState(self.handle)
-    if state.Status == Working:
-      sleep(5s)
-      goto WAIT_COMPLETION
-    if state.Status == Idle:
-      taskBackend.SetStatus(task.id, COMPLETED)
-      if clear_context:
+    result = runtime.WaitForResult(ctx, self.handle)  // Blocks until done or ctx expires
+    if result.Status == Completed:
+      taskBackend.MarkCompleted(task.id, self.identity, result)
+      if context_policy == "clear":
         runtime.Stop(self.handle, graceful=true)
         self.handle = runtime.Start(ctx, self.config)
       goto LOOP
-    if state.Status == Stalled:
-      taskBackend.SetStatus(task.id, FAILED, reason: "agent stalled")
+    if result.Status == Failed:
+      taskBackend.MarkFailed(task.id, self.identity, result.Error)
       runtime.Restart(self.handle)
       goto LOOP
 ```
 
 **Edge cases:**
-- Agent crashes mid-task: Task stays IN_PROGRESS. On restart, the loop picks it back up.
+- Agent crashes mid-task: Task stays InProgress. On restart, the loop checks for orphaned InProgress tasks assigned to self and resumes or re-queues them.
 - No tasks available: Loop sleeps for `poll_interval`, doesn't spin.
-- `clear_context = false`: Agent keeps context between tasks (useful for related tasks).
+- `context_policy = "keep"`: Agent retains context between tasks (useful for related tasks). `"clear"` resets fully, `"summarize"` injects a task-history summary before the next task.
 - Task backend unavailable: Log error, retry with exponential backoff (max 5m).
+- Concurrent claim race: `Claim()` is atomic — only one agent wins. Losers retry.
 
 ### 4.2 Agent Teams (Level 3)
 
@@ -528,48 +801,106 @@ idle_timeout = "5m"
 [agents.loop]
 enabled = true
 auto_execute = true
-clear_context = true
+context_policy = "clear"
 ```
 
 **Pool scaling algorithm:**
 
-```
+```go
 // PoolManager runs continuously while the workspace is active.
+type PoolManager struct {
+    agentName    string
+    config       *PoolConfig
+    runtime      RuntimeAdapter
+    taskBackend  TaskBackend
+    workers      []*AgentHandle
+    mu           sync.Mutex  // Serializes scale operations with task dispatch
+}
+
 func (pm *PoolManager) Run(ctx context.Context) {
+    // Initial scale-up to min (enforce pool invariant from the start)
+    pm.mu.Lock()
+    for i := pm.countRunning(); i < pm.config.Pool.Min; i++ {
+        handle, err := pm.runtime.Start(ctx, pm.makeWorkerConfig(i))
+        if err != nil {
+            log.Error("initial pool scale-up failed", err)
+            break
+        }
+        pm.workers = append(pm.workers, handle)
+    }
+    pm.mu.Unlock()
+
+    // Main scaling loop
     for {
-        pending = pm.taskBackend.CountPending(assignee: pm.agentName)
-        running = pm.countRunning()
+        // Phase 1: Compute scaling decisions under lock (fast, in-memory)
+        pm.mu.Lock()
+        pending, _ := pm.taskBackend.CountReady(pm.agentName)
+        running := pm.countRunning()
+        needed := min(pending, pm.config.Pool.Max) - running
+        idle := pm.findIdleWorkers(pm.config.Pool.IdleTimeout)
+        excess := max(0, len(idle) - pm.config.Pool.Min)
+        pm.mu.Unlock()
 
-        // Scale up: spawn workers for pending tasks up to max
-        needed = min(pending, pm.config.Pool.Max) - running
-        if needed > 0:
-            for i := 0; i < needed; i++:
-                workerConfig = pm.makeWorkerConfig(i)
-                handle, err = pm.runtime.Start(ctx, workerConfig)
-                if err != nil:
-                    log.Error("pool scale-up failed", err)
-                    break
-                pm.workers = append(pm.workers, handle)
+        // Phase 2: Execute scaling operations outside lock (slow I/O)
+        // Scale up
+        var newHandles []*AgentHandle
+        for i := 0; i < needed; i++ {
+            workerConfig := pm.makeWorkerConfig(running + i)
+            handle, err := pm.runtime.Start(ctx, workerConfig)
+            if err != nil {
+                log.Error("pool scale-up failed", err)
+                break
+            }
+            if probe, ok := pm.runtime.(ReadinessProbe); ok {
+                readyCtx, cancel := context.WithTimeout(ctx, workerConfig.Health.PingTimeout)
+                if err := probe.WaitReady(readyCtx, handle); err != nil {
+                    cancel()
+                    pm.runtime.Stop(handle, true)
+                    log.Error("worker failed readiness check", err)
+                    continue
+                }
+                cancel()
+            }
+            newHandles = append(newHandles, handle)
+        }
 
-        // Scale down: kill idle workers beyond min
-        idle = pm.findIdleWorkers(older_than: pm.config.Pool.IdleTimeout)
-        excess = max(0, len(idle) - pm.config.Pool.Min)
-        for i := 0; i < excess; i++:
-            pm.runtime.Stop(idle[i], graceful=true)
-            pm.removeWorker(idle[i])
+        // Scale down
+        var removed []*AgentHandle
+        for i := 0; i < excess; i++ {
+            state, err := pm.runtime.GetState(idle[i])
+            if err != nil || state.Status != StatusIdle {
+                continue
+            }
+            stopCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+            err = pm.runtime.Stop(idle[i], true)
+            cancel()
+            if err != nil {
+                log.Warn("graceful stop failed, escalating", "worker", idle[i], "error", err)
+                pm.runtime.Stop(idle[i], false)
+            }
+            removed = append(removed, idle[i])
+        }
 
+        // Phase 3: Update worker list under lock
+        pm.mu.Lock()
+        pm.workers = append(pm.workers, newHandles...)
+        for _, r := range removed {
+            pm.removeWorker(r)
+        }
+        pm.mu.Unlock()
         sleep(10s)
     }
 }
 ```
 
-**Pool invariant:** At any time `t`, `Min ≤ |running_workers(t)| ≤ Max`. Enforced by the PoolManager which is the sole creator/destroyer of pool instances.
+**Pool invariant:** At any time `t`, `Min <= |running_workers(t)| <= Max`. Enforced by the PoolManager holding `mu` during all scale operations, ensuring no concurrent scale-up/down races with task dispatch.
 
 **Edge cases:**
-- Worker crashes: PoolManager detects via `IsRunning()` check, removes from pool. Pending tasks are reassigned.
+- Worker crashes: PoolManager detects via `IsRunning()` check, removes from pool. Task stays InProgress and is reassigned on next cycle.
 - All workers busy, new task arrives: Task stays in queue until a worker completes and picks it up, or pool scales up.
 - Coordinator crashes: Workers continue running. On coordinator restart, it rediscovers workers via the handle registry.
 - `min = 0` and no tasks: Pool scales to zero. No resource usage when idle.
+- Scale-down race: The double-check on `GetState()` after acquiring `mu` prevents killing a worker that just received work.
 
 ### 4.3 Gas Town (Level 7)
 
@@ -615,6 +946,7 @@ name = "supervisor"
 role = "supervisor"
 runtime = "claude-code"
 scope = "workspace"
+depends_on = []  # Starts first (no dependencies)
 
 [agents.health]
 ping_timeout = "30s"
@@ -627,6 +959,7 @@ role = "service"
 runtime = "claude-code"
 scope = "workspace"
 ephemeral = true
+depends_on = ["supervisor"]
 [agents.pool]
 min = 0
 max = 3
@@ -637,12 +970,14 @@ name = "observer"
 role = "observer"
 scope = "project"
 runtime = "claude-code"
+depends_on = ["coordinator"]
 
 [[agents]]
 name = "integrator"
 role = "integrator"
 scope = "project"
 runtime = "claude-code"
+depends_on = ["coordinator"]
 
 [[agents]]
 name = "workers"
@@ -651,13 +986,14 @@ runtime = "claude-code"
 scope = "project"
 ephemeral = true
 isolation = "worktree"
+depends_on = ["coordinator", "observer"]
 [agents.pool]
 min = 0
 max = 5
 [agents.loop]
 enabled = true
 auto_execute = true
-clear_context = true
+context_policy = "clear"
 ```
 
 **Gas Town role mapping:**
@@ -672,17 +1008,123 @@ clear_context = true
 | Polecat | worker | project (pooled, ephemeral) | Executes individual tasks |
 | Crew | agent | project (persistent) | Long-lived workspace agents |
 
+### 4.4 Custom Roles and Externalized Role Definitions
+
+A core vision requirement: **roles are expressed externally, not hardcoded into the codebase.** Gas Town hardcodes role behaviors in Go packages (`internal/config/roles/*.toml` plus Go logic). Gas City externalizes them entirely.
+
+**Role behavior is defined by three things:**
+1. **Role name** in config: `role = "reviewer"` (any string, not a fixed enum)
+2. **System prompt** in `[agents.prompts]`: defines the agent's behavior, instructions, and personality
+3. **Coordination rules** in config: `depends_on`, `scope`, `ephemeral`, `isolation`, `pool`, `loop`, `hooks`
+
+There is no hardcoded role logic in the SDK. The SDK provides the infrastructure (task dispatch, health monitoring, messaging, etc.) and the role definition provides the policy (what the agent does, when, and how).
+
+**Example: Custom "reviewer" role**
+
+```toml
+[[agents]]
+name = "reviewer"
+role = "reviewer"                     # Custom role — no hardcoded behavior
+scope = "project"
+runtime = "claude-code"
+depends_on = ["coordinator"]
+
+[agents.prompts]
+system = "roles/reviewer.md"          # External markdown file defines behavior
+nudge = "Review the next pending PR."
+
+[agents.hooks]
+on_task_assign = "./scripts/checkout-pr.sh {{.Task}}"
+on_task_complete = "./scripts/post-review.sh {{.Task}}"
+
+[agents.loop]
+enabled = true
+auto_execute = true
+poll_interval = "1m"
+```
+
+**`roles/reviewer.md`** (externalized role definition):
+```markdown
+You are a code reviewer for the {{.Project}} project.
+
+Your responsibilities:
+- Review pull requests assigned to you
+- Check for correctness, security, and performance issues
+- Post your review as a GitHub comment
+- Mark the task as complete when done
+
+Coordination rules:
+- Wait for the coordinator to assign PRs
+- If you find critical issues, send a message to the "escalations" channel
+- If unsure, ask the coordinator for guidance via direct message
+```
+
+**Custom coordination rules** are expressed through the combination of:
+- `depends_on`: startup ordering
+- `[agents.hooks]`: event-driven actions (scripts run on lifecycle events)
+- `[agents.prompts]`: agent instructions that reference messaging/task APIs
+- `[agents.loop]`: autonomous polling behavior
+- Workflow templates: multi-step processes with dependency chains
+
+This means users can create entirely new orchestration topologies — a QA pipeline, a documentation generator, a multi-stage deployment system — without modifying SDK source code. Everything is configuration and prompts.
+
+**Contrast with Gas Town:**
+
+| Aspect | Gas Town | Gas City |
+|--------|----------|----------|
+| Role set | 7 hardcoded roles | Any string (user-defined) |
+| Role behavior | Go code in `internal/` | External prompts + config |
+| Coordination | Hardcoded in Mayor/Deacon | `depends_on` + hooks + workflows |
+| Worker instructions | Embedded in role package | `[agents.prompts]` files |
+| Adding a new role | Fork the codebase | Add `[[agents]]` to TOML + write a prompt |
+
 ---
 
-## 5. Startup and Shutdown
+## 5. Workspace Controller and Lifecycle
+
+### 5.0 Workspace Controller
+
+The workspace controller is the long-lived process that hosts all control loops: the event bus, agent registry, pool managers, supervisor patrol, hook executor, and workflow executor. It is the central coordination point that all other subsystems depend on.
+
+```go
+type WorkspaceController struct {
+    config       *WorkspaceConfig
+    registry     *AgentRegistry
+    eventBus     *EventBus
+    taskBackend  TaskBackend
+    poolManagers map[string]*PoolManager
+    supervisor   *Supervisor
+    hookExec     *HookExecutor
+    workflows    *WorkflowExecutor
+    lockFile     string  // .gc/controller.lock
+    socketPath   string  // .gc/controller.sock
+}
+```
+
+**Lifecycle:**
+
+1. **`gc start`** launches the controller. By default it runs in the foreground. Use `gc start --daemon` to background it.
+2. The controller acquires `.gc/controller.lock` (via `flock`) to prevent multiple controllers per workspace.
+3. It starts the event bus, loads adapters, then runs the startup sequencer (Section 5.1).
+4. After all agents are running, it starts the control loops: pool managers, supervisor patrol, hook executor.
+5. CLI commands (`gc status`, `gc task list`, etc.) connect to the controller via Unix socket at `.gc/controller.sock`.
+6. **`gc stop`** sends a shutdown signal to the controller, which runs the shutdown sequencer (Section 5.2).
+
+**Crash recovery:** If the controller crashes, agents continue running (they are independent OS processes). On next `gc start`, the controller rediscovers running agents via the persisted agent registry (`.gc/agents/*.json`). For each persisted agent, it checks whether the runtime adapter implements `Adopter`:
+- **Adopter runtimes** (tmux, Docker): Controller calls `Adopt()` to reconnect to the running process and resume control without restart.
+- **Non-Adopter runtimes** (subprocess): The original pipes are gone. Controller starts a fresh instance and re-queues any in-progress tasks.
+
+**Lock semantics:** The lock file uses `flock()` (not exclusive create), so it is automatically released if the controller process dies. A subsequent `gc start` can acquire the lock cleanly.
+
+**Formal guarantee — Single controller:** At most one controller process is active per workspace at any time. *Proof:* `flock(LOCK_EX|LOCK_NB)` on `.gc/controller.lock` returns `EWOULDBLOCK` if another process holds the lock. On failure, `gc start` exits with a "controller already running" error. On success, the lock persists until process exit (automatic flock release). There is no window where two controllers can both hold the lock.
 
 ### 5.1 Startup Sequencer
 
-Agents start in priority groups. Within each group, agents start in parallel. Groups start sequentially.
+Agents start according to a dependency DAG. If no `depends_on` is specified, agents use default priority groups based on role. Within a dependency level, agents start in parallel.
 
 ```go
-// Priority groups derived from agent config
-var startupPriority = map[string]int{
+// Default priorities (used when depends_on is not specified)
+var defaultPriority = map[string]int{
     "supervisor":  0,  // Health monitor must be first to watch everything
     "coordinator": 1,  // Dispatcher starts after monitor is watching
     "observer":    2,  // Per-project monitors
@@ -694,57 +1136,124 @@ var startupPriority = map[string]int{
 // Custom roles default to priority 2 (same as per-project agents)
 ```
 
-**Startup algorithm:**
+**Startup algorithm with DAG resolution and rollback:**
 
-```
+```go
 func StartWorkspace(cfg *WorkspaceConfig) error {
-    groups = groupByPriority(cfg.Agents)
-    sort(groups by priority ascending)
+    // Build dependency graph from depends_on + default priorities
+    graph := buildStartupGraph(cfg.Agents)
+    if cycle := graph.DetectCycle(); cycle != nil {
+        return fmt.Errorf("dependency cycle: %s", strings.Join(cycle, " -> "))
+    }
 
-    for _, group in groups:
-        if group.priority >= 3:
+    groups := graph.TopologicalGroups()  // Groups of agents with no inter-dependencies
+    started := []*AgentHandle{}
+
+    rollback := func() {
+        // Reverse order: stop most recently started first
+        for i := len(started) - 1; i >= 0; i-- {
+            runtime.Stop(started[i], graceful: true)
+        }
+    }
+
+    for _, group := range groups {
+        if group.onDemand {
             continue  // On-demand agents don't start at workspace startup
+        }
 
         var wg sync.WaitGroup
-        for _, agentCfg in group.agents:
-            if agentCfg.Scope == "project":
-                // Start one instance per project
-                for _, project in cfg.Projects:
-                    wg.Add(1)
-                    go startAgent(agentCfg, project, &wg)
-            else:
+        var startErrs []error
+        var errMu sync.Mutex
+        startedBefore := len(started)
+
+        for _, agentCfg := range group.agents {
+            instances := resolveInstances(agentCfg, cfg.Projects)
+            for _, inst := range instances {
                 wg.Add(1)
-                go startAgent(agentCfg, "", &wg)
+                go func(ac AgentConfig) {
+                    defer wg.Done()
+                    handle, err := startAgent(ac)
+                    if err != nil {
+                        errMu.Lock()
+                        startErrs = append(startErrs, fmt.Errorf("agent %s failed: %w", ac.Name, err))
+                        errMu.Unlock()
+                        return
+                    }
+                    errMu.Lock()
+                    started = append(started, handle)
+                    errMu.Unlock()
+                }(inst)
+            }
+        }
         wg.Wait()
 
-        // Verify all agents in this group are running
-        for _, handle in group.handles:
-            if !runtime.IsRunning(handle):
-                return fmt.Errorf("agent %s failed to start", handle.Agent)
+        if len(startErrs) > 0 {
+            rollback()
+            return errors.Join(startErrs...)  // Report ALL failures, not just the last
+        }
+
+        // Verify all agents started in this group (use startedBefore, not group.agents count,
+        // because project-scoped agents expand into multiple instances)
+        for _, handle := range started[startedBefore:] {
+            if !runtime.IsRunning(handle) {
+                rollback()
+                return fmt.Errorf("agent %s failed to start", handle.Identity.Name)
+            }
+        }
+    }
     return nil
 }
 ```
 
-**Startup ordering invariant:** For any two agents `a` and `b`, if `priority(a) < priority(b)`, then `a` is confirmed running before `b` starts. Formally: `IsRunning(a) = true` before `Start(b)` is called.
+**Startup ordering invariant:** For any two agents `a` and `b`, if `a` is in `b.depends_on`, then `a` is confirmed running before `b.Start()` is called. Formally: `IsRunning(a) = true` before `Start(b)` is called.
+
+**Rollback guarantee:** If any agent fails to start, all previously started agents are stopped in reverse order, leaving the workspace in a clean state.
 
 ### 5.2 Shutdown Sequencer
 
 Reverse of startup. Workers stop first (before monitors try to restart them), then observers, then coordinator, then supervisor.
 
-```
-func StopWorkspace(cfg *WorkspaceConfig) error {
-    groups = groupByPriority(cfg.Agents)
-    sort(groups by priority DESCENDING)  // Reverse order
+**In-progress task handling:**
+- `gc stop` (graceful): Waits for in-progress tasks to complete up to `--drain-timeout` (default 5m). Tasks not completed within the timeout are re-queued as `Ready` with a `shutdown_interrupted` flag.
+- `gc stop --force`: Stops agents immediately. Tasks left `InProgress` are marked with `shutdown_interrupted = true` for recovery on next `gc start`.
 
-    for _, group in groups:
+```go
+func StopWorkspace(cfg *WorkspaceConfig, drainTimeout time.Duration, force bool) error {
+    groups := buildStartupGraph(cfg.Agents).TopologicalGroups()
+    slices.Reverse(groups)  // Reverse order for shutdown
+
+    // Set shuttingDown flag so supervisor doesn't restart agents
+    setShuttingDown(true)
+
+    if !force && drainTimeout > 0 {
+        // Wait for in-progress tasks to complete
+        drainCtx, cancel := context.WithTimeout(ctx, drainTimeout)
+        defer cancel()
+        waitForInProgressTasks(drainCtx, taskBackend)
+        // Any tasks still InProgress after drain timeout are re-queued
+        requeueInterruptedTasks(taskBackend)
+    } else if force {
+        requeueInterruptedTasks(taskBackend)
+    }
+
+    for _, group := range groups {
         var wg sync.WaitGroup
-        for _, handle in group.handles:
+        for _, handle := range group.handles {
             wg.Add(1)
             go func(h AgentHandle) {
-                runtime.Stop(h, graceful=true)
-                wg.Done()
+                defer wg.Done()
+                // Graceful stop with timeout escalation
+                stopCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+                err := runtime.Stop(h, graceful: true)
+                cancel()
+                if err != nil {
+                    log.Warn("graceful stop failed, forcing", "agent", h.Identity.Name)
+                    runtime.Stop(h, graceful: false)
+                }
             }(handle)
+        }
         wg.Wait()
+    }
 
     return nil
 }
@@ -752,7 +1261,9 @@ func StopWorkspace(cfg *WorkspaceConfig) error {
 
 **Edge cases:**
 - Agent doesn't stop within timeout: Escalate to `Stop(handle, graceful=false)`.
-- Supervisor restarts an agent during shutdown: Shutdown sets a `shuttingDown` flag that the supervisor checks before restarting.
+- Supervisor restarts an agent during shutdown: Shutdown sets a `shuttingDown` flag (field on WorkspaceController) that the supervisor checks before restarting.
+
+**Formal guarantee — No work loss on shutdown:** For every task `T` with `Status == InProgress` at shutdown time, exactly one of: (a) `T` completes within the drain timeout and is marked `Completed`, or (b) `T` is re-queued as `Ready` with `ClaimedBy = ""`. No task can remain `InProgress` with a dead agent after shutdown completes.
 - Orphaned processes: `gc stop --force` kills all processes matching the workspace's process group.
 
 ---
@@ -763,11 +1274,12 @@ func StopWorkspace(cfg *WorkspaceConfig) error {
 
 ```go
 type Event struct {
+    Sequence  int64     // Monotonically increasing sequence number
     Timestamp time.Time
     Type      EventType
-    Agent     string  // Agent name (empty for system events)
-    Project   string  // Project name (empty for workspace events)
-    Payload   any     // Type-specific payload
+    Agent     string    // Agent name (empty for system events)
+    Project   string    // Project name (empty for workspace events)
+    Payload   any       // Type-specific payload
 }
 
 type EventType string
@@ -776,7 +1288,9 @@ const (
     EventAgentStopped   EventType = "agent.stopped"
     EventAgentStalled   EventType = "agent.stalled"
     EventAgentCrashed   EventType = "agent.crashed"
+    EventAgentReady     EventType = "agent.ready"
     EventTaskCreated    EventType = "task.created"
+    EventTaskClaimed    EventType = "task.claimed"
     EventTaskAssigned   EventType = "task.assigned"
     EventTaskCompleted  EventType = "task.completed"
     EventTaskFailed     EventType = "task.failed"
@@ -788,49 +1302,95 @@ const (
     EventPoolScaleUp    EventType = "pool.scale_up"
     EventPoolScaleDown  EventType = "pool.scale_down"
     EventWorkflowStep   EventType = "workflow.step_completed"
+    EventWorkflowFailed EventType = "workflow.step_failed"
 )
 ```
 
 ### 6.2 Bus Implementation
 
+The event bus uses tiered subscribers to prevent dropping critical events while tolerating slow optional consumers:
+
 ```go
 type EventBus struct {
     mu          sync.RWMutex
-    subscribers []chan<- Event
-    buffer      *ring.Buffer[Event]  // Last 10,000 events for replay
+    sequence    int64
+    critical    []EventSubscriber  // Block on these (supervisor, structured logger)
+    optional    []EventSubscriber  // Fire-and-forget (CLI feed, metrics)
+    buffer      *ring.Buffer[Event]  // Ring buffer (10k events) for catch-up on subscribe
 }
 
-func (b *EventBus) Publish(event Event) {
-    b.mu.RLock()
-    defer b.mu.RUnlock()
+type EventSubscriber interface {
+    OnEvent(event Event) error
+    IsCritical() bool
+}
+
+func (b *EventBus) Publish(event Event) error {
+    b.mu.Lock()
+    event.Sequence = atomic.AddInt64(&b.sequence, 1)
     b.buffer.Push(event)
-    for _, ch := range b.subscribers {
-        select {
-        case ch <- event:
-        default:
-            // Drop event if subscriber is slow (log warning)
+    // Snapshot subscriber lists under lock to avoid races with Subscribe/Unsubscribe
+    criticals := append([]EventSubscriber(nil), b.critical...)
+    optionals := append([]EventSubscriber(nil), b.optional...)
+    b.mu.Unlock()
+
+    // Critical subscribers: block and propagate errors
+    for _, sub := range criticals {
+        if err := sub.OnEvent(event); err != nil {
+            return fmt.Errorf("critical subscriber failed: %w", err)
         }
+    }
+
+    // Optional subscribers: fire-and-forget
+    for _, sub := range optionals {
+        go sub.OnEvent(event)
+    }
+
+    return nil
+}
+
+func (b *EventBus) Subscribe(sub EventSubscriber) {
+    b.mu.Lock()
+    // Snapshot buffer under lock
+    snapshot := b.buffer.Snapshot()
+    if sub.IsCritical() {
+        b.critical = append(b.critical, sub)
+    } else {
+        b.optional = append(b.optional, sub)
+    }
+    b.mu.Unlock()
+
+    // Replay outside lock so publishes are not blocked during replay
+    for _, event := range snapshot {
+        sub.OnEvent(event)
     }
 }
 
-func (b *EventBus) Subscribe() <-chan Event {
-    ch := make(chan Event, 100)
+func (b *EventBus) Unsubscribe(sub EventSubscriber) {
     b.mu.Lock()
-    b.subscribers = append(b.subscribers, ch)
-    b.mu.Unlock()
-    return ch
+    defer b.mu.Unlock()
+    // Remove from appropriate list
+    b.critical = removeSubscriber(b.critical, sub)
+    b.optional = removeSubscriber(b.optional, sub)
 }
 ```
 
+**Subscriber tiers:**
+- **Critical:** Supervisor, structured logger, hook executor. These block `Publish()` — if they fail, the event is not silently lost.
+- **Optional:** CLI activity feed, metrics aggregator. These receive events asynchronously. Slow consumers may miss events but never stall the bus.
+
+**Formal guarantee — Critical delivery:** For every event `e` published to the bus, if `Publish(e)` returns `nil`, then every critical subscriber `s` has processed `e` (i.e., `s.OnEvent(e)` returned `nil`). If any critical subscriber returns an error, `Publish` propagates that error and no further subscribers (critical or optional) are invoked. *Corollary:* Critical subscribers form a total order — subscriber `s_i` processes event `e` before `s_{i+1}` sees it.
+
+**Formal guarantee — Sequence monotonicity:** Event sequences are monotonically increasing: `forall e1, e2: e1 published before e2 => e1.Sequence < e2.Sequence`. This is enforced by incrementing the sequence counter under the write lock before snapshot.
+
 ### 6.3 Built-in Consumers
 
-| Consumer | Subscribes To | Output |
-|----------|--------------|--------|
-| CLI activity feed | All events | `gc activity --follow` real-time display |
-| Structured logger | All events | JSON lines to `workspace/.gc/events.jsonl` |
-| Hook executor | Configurable per event type | Runs user-defined shell commands |
-| Metrics aggregator | Health + task events | Powers `gc stats` command |
-| Supervisor | Agent lifecycle + health events | Triggers restart logic |
+| Consumer | Tier | Subscribes To | Output |
+|----------|------|--------------|--------|
+| Structured logger | Critical | All events + agent logs | `workspace/.gc/logs.jsonl` (attributed with agent_id) |
+| Hook executor | Critical | Configurable per event type | Runs user-defined shell commands |
+| Supervisor | Critical | Agent lifecycle + health events | Triggers restart logic |
+| CLI activity feed | Optional | All events | `gc activity --follow` real-time display |
+| Metrics aggregator | Optional | Health + task events | Powers `gc stats` command |
 
 ---
 
@@ -840,37 +1400,80 @@ func (b *EventBus) Subscribe() <-chan Event {
 
 The supervisor agent runs a patrol cycle at regular intervals:
 
-```
-PATROL:
-  for agent in workspace.allRunningAgents():
-    if agent.role == "supervisor":
-      continue  // Don't self-monitor
+```go
+func (s *Supervisor) PatrolLoop(ctx context.Context) {
+    for {
+        if isShuttingDown() {
+            return  // Don't interfere with shutdown
+        }
 
-    result = runtime.Ping(agent.handle)
-    bus.Publish(Event{Type: result.OK ? PingOK : PingFail, Agent: agent.name})
+        for _, agent := range s.workspace.AllRunningAgents() {
+            if agent.Identity.Name == s.identity.Name {
+                continue  // Don't self-monitor
+            }
 
-    if !result.OK:
-      agent.consecutiveFailures++
-      if agent.consecutiveFailures >= agent.health.consecutive_failures:
-        if time.Since(agent.lastRestart) < agent.health.kill_cooldown:
-          bus.Publish(Event{Type: AgentStalled, Agent: agent.name})
-          continue  // Cooldown period, don't restart yet
-        runtime.Restart(agent.handle)
-        agent.consecutiveFailures = 0
-        agent.lastRestart = time.Now()
-        bus.Publish(Event{Type: HealthRestart, Agent: agent.name})
-    else:
-      agent.consecutiveFailures = 0
+            result, err := s.runtime.Ping(agent.handle)
+            if err != nil {
+                s.bus.Publish(Event{Type: EventHealthPingFail, Agent: agent.Identity.Name})
+                agent.consecutiveFailures++
+            } else if result.OK {
+                s.bus.Publish(Event{Type: EventHealthPingOK, Agent: agent.Identity.Name})
+                agent.consecutiveFailures = 0
+            } else {
+                agent.consecutiveFailures++
+            }
 
-  sleep(30s)
-  goto PATROL
+            if agent.consecutiveFailures >= agent.health.ConsecutiveFailures {
+                if time.Since(agent.lastRestart) < agent.health.KillCooldown {
+                    s.bus.Publish(Event{Type: EventAgentStalled, Agent: agent.Identity.Name})
+                    continue  // Cooldown period, don't restart yet
+                }
+                s.runtime.Restart(agent.handle)
+                agent.consecutiveFailures = 0
+                agent.lastRestart = time.Now()
+                s.bus.Publish(Event{Type: EventHealthRestart, Agent: agent.Identity.Name})
+            }
+        }
+
+        select {
+        case <-ctx.Done():
+            return
+        case <-time.After(30 * time.Second):
+        }
+    }
+}
 ```
 
 ### 7.2 Stall Detection
 
 An agent is stalled when:
 - It reports `Status = Working` for longer than `stuck_threshold`
+- AND it has not reported progress within `stuck_threshold` (via `LastProgressUpdate`)
 - AND `Ping()` returns OK (agent is alive but not making progress)
+
+```go
+func (s *Supervisor) isStalled(handle *AgentHandle, state AgentState) bool {
+    if state.Status != StatusWorking {
+        return false
+    }
+
+    elapsed := time.Since(state.WorkStartedAt)
+    noProgress := time.Since(state.LastProgressUpdate) > s.config.StuckThreshold
+
+    // Not stalled if:
+    // 1. Agent has reported progress recently, OR
+    // 2. Elapsed time < threshold
+    if !noProgress || elapsed < s.config.StuckThreshold {
+        return false
+    }
+
+    // Final check: is the agent actually responsive?
+    result, _ := s.runtime.Ping(handle)
+    return result.OK  // Alive but not progressing = stalled
+}
+```
+
+**Progress reporting:** Agents can update `LastProgressUpdate` and `ProgressMessage` by writing to a well-known progress file (`<workdir>/.gc/progress.json`) or through a heartbeat mechanism. The runtime adapter's `GetState()` reads this file to populate the fields. This distinguishes "slow legitimate work" (frequent progress updates) from "actual stall" (no updates for `stuck_threshold`).
 
 Stall response: publish `EventAgentStalled`. The supervisor's default behavior is to wait for one more patrol cycle, then force-restart. Custom behavior via hooks:
 ```toml
@@ -885,44 +1488,105 @@ on_stall = "./scripts/page-oncall.sh {{.Agent}} {{.Project}}"
 ### 8.1 Task Backend Interface
 
 ```go
+type TaskStatus int
+const (
+    StatusOpen       TaskStatus = iota
+    StatusReady                        // All deps resolved, available for claim
+    StatusInProgress                   // Claimed and being worked on
+    StatusCompleted                    // Successfully finished
+    StatusFailed                       // Terminal failure
+    StatusBlocked                      // Blocked on unresolved dependencies
+)
+
 type TaskBackend interface {
+    // CRUD
     List(filter TaskFilter) ([]Task, error)
     Get(id string) (Task, error)
     Create(task Task) (string, error)  // Returns ID
     Update(id string, updates TaskUpdates) error
-    CountPending(assignee string) (int, error)
+    CountReady(claimableBy string) (int, error)  // Count tasks claimable by agent
+
+    // Atomic operations for concurrency safety
+    Claim(id string, agent string) (bool, error)                     // Atomic: claim or return false
+    MarkInProgress(id string, agent string) error
+    MarkCompleted(id string, claimedBy string, result TaskResult) error
+    MarkFailed(id string, agent string, reason string) error
 }
 
 type Task struct {
-    ID          string
-    Title       string
-    Description string
-    Status      TaskStatus  // Open, InProgress, Completed, Failed
-    Assignee    string      // Agent name
-    Priority    int
-    Labels      []string
-    Project     string
-    CreatedAt   time.Time
-    UpdatedAt   time.Time
-    Dependencies []string   // Task IDs that must complete first
+    ID           string
+    Title        string
+    Description  string
+    Status       TaskStatus
+    Assignee     string      // Target agent/pool name (routing: WHO should do this)
+    ClaimedBy    string      // Instance that claimed it (tracking: WHO is doing this)
+    Priority     int
+    Labels       []string
+    Project      string
+    CreatedAt    time.Time
+    UpdatedAt    time.Time
+    Dependencies []string    // Task IDs that must complete first
+    Version      int64       // Optimistic lock version (incremented on every update)
+    Result       *TaskResult // Non-nil when completed
 }
 
 type TaskFilter struct {
-    Status   TaskStatus
-    Assignee string
-    Project  string
-    Labels   []string
-    NoDeps   bool  // Only tasks with no unresolved dependencies
+    Status      TaskStatus
+    Assignee    string   // Filter by target agent/pool name
+    ClaimableBy string   // Filter for tasks claimable by this agent (Assignee matches or empty)
+    Project     string
+    Labels      []string
+    NoDeps      bool     // Only tasks with no unresolved dependencies
+    SortBy      string   // "priority", "created", "updated"
+    SortOrder   string   // "asc", "desc"
+}
+
+type TaskUpdates struct {
+    Status   *TaskStatus
+    Assignee *string
+    Result   *TaskResult
+    Error    *string
+    Version  int64  // Must match current version (optimistic lock)
 }
 ```
 
+**Status transition rules:**
+
+```
+Open -> Ready       (when all dependencies complete)
+Ready -> InProgress (via Claim())
+InProgress -> Completed (via MarkCompleted())
+InProgress -> Failed    (via MarkFailed())
+Failed -> Ready     (manual retry via gc task retry)
+Blocked -> Ready    (when blocking dependency completes)
+```
+
+Invalid transitions (return error): `Completed -> *`, `Ready -> Open`, any backward transition not listed above.
+
+**Dependency resolution:** When a task is created with `Dependencies` (list of task IDs), it starts in `StatusBlocked`. On each `MarkCompleted(taskID)`, the backend queries all tasks that list `taskID` in their `Dependencies`. For each, it checks whether *all* dependencies are now completed. If so, it transitions the task from `Blocked` to `Ready`, making it available for claiming. This resolution is triggered inside `MarkCompleted()` to ensure atomicity.
+
+**Formal guarantee — No double-execution:** For any task `T`, exactly one of these holds at any time:
+1. `T.ClaimedBy == ""` (unclaimed — no agent is executing it), OR
+2. `T.ClaimedBy == agent_i` for exactly one agent `agent_i` (single executor)
+
+*Proof:* The `Claim()` operation is atomic (flock/SQL transaction). It checks `ClaimedBy == ""` and sets `ClaimedBy = agent` in a single critical section. If two agents race, the backend's atomic primitive ensures at most one sees the empty state and succeeds. The `ClaimedBy` field is only cleared on explicit `MarkCompleted`/`MarkFailed` + retry, which transitions Status back to Ready before re-enabling claims.
+
+**Formal guarantee — Dependency correctness:** A task `T` with dependencies `D = {d1, d2, ..., dk}` transitions to `Ready` if and only if `forall di in D: di.Status == Completed`. *Proof:* `MarkCompleted(di)` scans dependents and only transitions those where all deps are completed. Since `MarkCompleted` is called under a per-task lock (or transaction), the check-then-transition is atomic.
+
+**Claim semantics:** `Claim(id, agent)` atomically checks `Status == Ready && ClaimedBy == ""`, sets `Status = InProgress, ClaimedBy = agent`, and increments `Version`. If the task is already claimed, it returns `(false, nil)`. This prevents two agents from claiming the same task. The `Assignee` field is for routing (which agent/pool should receive this task) and is set at creation time; `ClaimedBy` tracks which specific instance is executing it.
+
+**Task assignment models:**
+- **Push model (coordinator dispatches):** Coordinator creates tasks with `Assignee = "worker-pool"`. Workers in the pool list tasks where `ClaimableBy` matches their pool name and claim them.
+- **Pull model (agents self-select):** Tasks created with empty `Assignee`. Any agent with matching labels/project can claim.
+- **Direct assignment:** Task created with `Assignee = "specific-agent"`. Only that agent can claim it.
+
 ### 8.2 Built-in Backends
 
-**Beads backend:** Wraps Gas Town's existing Dolt-based beads system. Each task is a bead. Dependencies are bead dependencies. Status maps: Open → new, InProgress → in_progress, Completed → done, Failed → blocked.
+**Beads backend:** Wraps Gas Town's existing Dolt-based beads system. Each task is a bead. Dependencies are bead dependencies. Status maps: Open -> new, Ready -> ready, InProgress -> in_progress, Completed -> done, Failed -> blocked. `Claim()` uses Dolt's SQL transactions for atomicity.
 
-**GitHub Issues backend:** Maps tasks to GitHub Issues via the `gh` CLI. Labels filter issues. Status maps: Open → open issue, InProgress → open + "in-progress" label, Completed → closed issue.
+**GitHub Issues backend:** Maps tasks to GitHub Issues via the `gh` CLI. Labels filter issues. Status maps: Open -> open issue, InProgress -> open + "in-progress" label, Completed -> closed issue. `Claim()` uses issue assignment + label as a two-step atomic operation (check-then-assign with retry).
 
-**Filesystem backend:** JSON files in `.gc/tasks/`. Zero dependencies. Good for simple setups and testing.
+**Filesystem backend:** JSON files in `.gc/tasks/`. Zero dependencies. Good for simple setups and testing. `Claim()` uses filesystem locking (`flock`).
 
 ```go
 // FilesystemBackend stores tasks as JSON files.
@@ -933,9 +1597,77 @@ type FilesystemBackend struct {
 func (f *FilesystemBackend) Create(task Task) (string, error) {
     task.ID = uuid.New().String()[:8]
     task.CreatedAt = time.Now()
+    task.Version = 1
     data, _ := json.MarshalIndent(task, "", "  ")
     return task.ID, os.WriteFile(filepath.Join(f.dir, task.ID+".json"), data, 0644)
 }
+
+func (f *FilesystemBackend) Claim(id string, agent string) (bool, error) {
+    path := filepath.Join(f.dir, id+".json")
+    lockFile := path + ".lock"
+
+    // Advisory lock via flock (automatically released if process crashes)
+    lock, err := os.OpenFile(lockFile, os.O_CREATE|os.O_WRONLY, 0644)
+    if err != nil {
+        return false, err
+    }
+    defer lock.Close()
+
+    if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+        return false, nil  // Lock held by another process
+    }
+    defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+
+    task, err := f.Get(id)
+    if err != nil {
+        return false, err
+    }
+    if task.Status != StatusReady || task.ClaimedBy != "" {
+        return false, nil  // Already claimed
+    }
+
+    task.Status = StatusInProgress
+    task.ClaimedBy = agent
+    task.Version++
+    task.UpdatedAt = time.Now()
+    data, _ := json.MarshalIndent(task, "", "  ")
+    return true, os.WriteFile(path, data, 0644)
+}
+```
+
+### 8.3 Batch (Convoy) Tracking
+
+A **batch** groups related tasks that were dispatched together, enabling aggregate progress tracking and coordinated completion. This maps to Gas Town's "convoy" concept where multiple beads move through the pipeline as a unit.
+
+```go
+type Batch struct {
+    ID        string
+    Name      string       // Human-readable label (e.g., "feature-auth")
+    TaskIDs   []string     // Tasks in this batch
+    CreatedAt time.Time
+    Status    BatchStatus  // Pending, InProgress, Completed, PartialFailure
+}
+
+type BatchStatus int
+const (
+    BatchPending        BatchStatus = iota
+    BatchInProgress                         // At least one task started
+    BatchCompleted                          // All tasks completed
+    BatchPartialFailure                     // Some tasks failed
+)
+```
+
+**Behavior:**
+- When `auto_track = true`, creating multiple tasks in a single coordinator dispatch automatically groups them into a batch.
+- Batch status is derived: `InProgress` when any task is claimed, `Completed` when all tasks complete, `PartialFailure` when any task fails with others completed.
+- `gc batch status <id>` shows aggregate progress. `gc batch list` shows active batches.
+
+**CLI commands:**
+
+```
+gc batch list                          # Show active batches
+gc batch status <id>                   # Aggregate progress for a batch
+gc batch retry <id>                    # Retry failed tasks in a batch
 ```
 
 ---
@@ -947,21 +1679,34 @@ func (f *FilesystemBackend) Create(task Task) (string, error) {
 ```go
 type MessageBackend interface {
     Send(msg Message) error
-    Inbox(agent string, unreadOnly bool) ([]Message, error)
+    Get(id string) (Message, error)
+    Inbox(agent string, filter MessageFilter) ([]Message, error)
     MarkRead(id string) error
     Delete(id string) error
-    Subscribe(agent string) (<-chan Message, error)
+    Subscribe(agent string, since time.Time) (<-chan Message, error)
 }
 
 type Message struct {
     ID        string
-    From      string    // Agent name
-    To        string    // Agent name or channel name
+    From      string      // Agent name (sender)
+    To        string      // Agent name or channel name
     Subject   string
     Body      string
-    Timestamp time.Time
+    Channel   string      // Empty for direct messages
+    CreatedAt time.Time
     Read      bool
-    Channel   string    // Empty for direct messages
+    ReadAt    *time.Time
+    ExpiresAt *time.Time  // Optional TTL — nil means no expiration
+}
+
+type MessageFilter struct {
+    UnreadOnly bool
+    FromAgent  string
+    Channel    string
+    Since      time.Time
+    Before     time.Time
+    SortBy     string  // "created" (default), "received"
+    SortOrder  string  // "asc" (default), "desc"
 }
 ```
 
@@ -971,6 +1716,14 @@ type Message struct {
 - Channel messages: `To = ""`, `Channel = "channel-name"`
 - All agents subscribed to a channel receive the message
 - Channels are configured in `[messaging] channels = [...]`
+
+### 9.3 Delivery Guarantees
+
+- **Ordering:** Messages are delivered in `CreatedAt` order within a channel or direct conversation. `Subscribe(agent, since)` replays messages created after `since`, then streams new ones.
+- **Delivery:** At-least-once for direct messages (retried on backend failure). At-most-once for channel broadcasts (fire-and-forget to each subscriber).
+- **Idempotency:** `Send()` with the same message ID is a no-op. Message IDs are generated by the sender.
+- **TTL:** Messages with `ExpiresAt` set are automatically cleaned up by a periodic garbage collector. Expired messages are excluded from `Inbox()` results.
+- **Backpressure:** If a subscriber's channel buffer fills, new messages are buffered in the backend and delivered on next poll. The backend never blocks `Send()`.
 
 ---
 
@@ -1009,6 +1762,11 @@ Sequential workflow:
 formula = "feature-pipeline"
 type = "workflow"
 
+[strategy]
+on_step_failure = "fail"   # "fail", "skip", "retry"
+max_retries = 2
+step_timeout = "30m"
+
 [[steps]]
 id = "design"
 title = "Create design doc"
@@ -1031,42 +1789,176 @@ needs = ["test"]
 
 ### 10.2 Workflow Execution
 
-```
-func ExecuteWorkflow(template WorkflowTemplate, agents []AgentHandle) error {
+```go
+type WorkflowExecution struct {
+    TemplateID    string
+    Steps         map[string]*StepExecution
+    Status        WorkflowStatus  // Running, Completed, Failed
+    StartedAt     time.Time
+    CompletedAt   time.Time
+    FailureReason string
+}
+
+type StepExecution struct {
+    ID          string
+    Status      StepStatus  // Pending, Running, Completed, Failed, Skipped
+    Agent       *AgentHandle
+    AssignedAt  time.Time
+    CompletedAt time.Time
+    Result      *TaskResult
+    Error       string
+    RetryCount  int
+}
+
+type WorkflowStrategy struct {
+    OnStepFailure string         // "fail", "skip", "retry"
+    MaxRetries    int
+    StepTimeout   time.Duration
+}
+
+func ExecuteWorkflow(ctx context.Context, template WorkflowTemplate, agents []AgentHandle, strategy WorkflowStrategy) (*WorkflowExecution, error) {
+    exec := &WorkflowExecution{
+        TemplateID: template.ID,
+        StartedAt:  time.Now(),
+        Steps:      make(map[string]*StepExecution),
+        Status:     WorkflowRunning,
+    }
+
     switch template.Type {
     case "workflow":
-        return executeSequential(template.Steps, agents)
+        return executeSequential(ctx, template.Steps, agents, strategy, exec)
     case "aspect":
-        return executeParallel(template.Aspects, agents)
+        return executeParallel(ctx, template.Aspects, agents, strategy, exec)
     case "expansion":
-        return expandAndExecute(template, agents)
+        return expandAndExecute(ctx, template, agents, strategy, exec)
     }
+    return nil, fmt.Errorf("unknown workflow type: %s", template.Type)
 }
 
-func executeSequential(steps []Step, agents []AgentHandle) error {
-    completed = set{}
-    for _, step in topologicalSort(steps):
+func executeSequential(ctx context.Context, steps []Step, agents []AgentHandle, strategy WorkflowStrategy, exec *WorkflowExecution) (*WorkflowExecution, error) {
+    for _, step := range topologicalSort(steps) {
         // Wait for dependencies
-        for _, dep in step.Needs:
-            waitUntil(completed.contains(dep))
-        // Assign to next available agent
-        agent = findAvailable(agents)
-        runtime.Assign(agent, stepToTask(step))
-        waitForCompletion(agent)
-        completed.add(step.ID)
+        for _, dep := range step.Needs {
+            depExec := exec.Steps[dep]
+            if depExec != nil && depExec.Status == StepFailed {
+                if strategy.OnStepFailure == "fail" {
+                    exec.Status = WorkflowFailed
+                    exec.FailureReason = fmt.Sprintf("dependency %s failed", dep)
+                    return exec, fmt.Errorf("workflow failed: dependency %s failed", dep)
+                }
+            }
+        }
+
+        agent := findAvailable(agents)
+        stepExec := &StepExecution{
+            ID:         step.ID,
+            Agent:      &agent,
+            AssignedAt: time.Now(),
+            Status:     StepRunning,
+        }
+        exec.Steps[step.ID] = stepExec
+
+        // Execute with retry loop
+        var lastErr error
+        for attempt := 0; attempt <= strategy.MaxRetries; attempt++ {
+            stepCtx, cancel := context.WithTimeout(ctx, strategy.StepTimeout)
+            runtime.Assign(agent, stepToTask(step))
+            result, err := runtime.WaitForResult(stepCtx, agent)
+            cancel()
+
+            if err == nil && result.Status != Failed {
+                // Success
+                stepExec.Status = StepCompleted
+                stepExec.Result = &result
+                stepExec.CompletedAt = time.Now()
+                bus.Publish(Event{Type: EventWorkflowStep, Payload: stepExec})
+                lastErr = nil
+                break
+            }
+
+            lastErr = coalesceErr(err, result.Error)
+            stepExec.RetryCount = attempt + 1
+
+            if strategy.OnStepFailure != "retry" || attempt >= strategy.MaxRetries {
+                break  // Don't retry if strategy is fail/skip, or retries exhausted
+            }
+            log.Info("retrying step", "step", step.ID, "attempt", attempt+2)
+        }
+
+        if lastErr != nil {
+            stepExec.Status = StepFailed
+            stepExec.Error = lastErr.Error()
+
+            switch strategy.OnStepFailure {
+            case "fail":
+                exec.Status = WorkflowFailed
+                exec.FailureReason = fmt.Sprintf("step %s failed: %s", step.ID, stepExec.Error)
+                return exec, fmt.Errorf("workflow failed at step %s", step.ID)
+            case "skip":
+                stepExec.Status = StepSkipped
+            case "retry":
+                exec.Status = WorkflowFailed
+                return exec, fmt.Errorf("step %s failed after %d retries", step.ID, strategy.MaxRetries)
+            }
+        }
+    }
+
+    exec.Status = WorkflowCompleted
+    exec.CompletedAt = time.Now()
+    return exec, nil
 }
 
-func executeParallel(aspects []Aspect, agents []AgentHandle) error {
+func executeParallel(ctx context.Context, aspects []Aspect, agents []AgentHandle, strategy WorkflowStrategy, exec *WorkflowExecution) (*WorkflowExecution, error) {
     var wg sync.WaitGroup
-    for i, aspect in aspects:
-        agent = agents[i % len(agents)]
+    var firstErr error
+    var errOnce sync.Once
+
+    for i, aspect := range aspects {
+        agent := agents[i % len(agents)]
+        stepExec := &StepExecution{
+            ID:         aspect.ID,
+            Agent:      &agent,
+            AssignedAt: time.Now(),
+            Status:     StepRunning,
+        }
+        exec.Steps[aspect.ID] = stepExec
+
         wg.Add(1)
-        go func(a Aspect, h AgentHandle) {
+        go func(a Aspect, h AgentHandle, se *StepExecution) {
+            defer wg.Done()
+
+            stepCtx, cancel := context.WithTimeout(ctx, strategy.StepTimeout)
+            defer cancel()
+
             runtime.Assign(h, aspectToTask(a))
-            waitForCompletion(h)
-            wg.Done()
-        }(aspect, agent)
+            result, err := runtime.WaitForResult(stepCtx, h)
+
+            if err != nil || result.Status == Failed {
+                se.Status = StepFailed
+                se.Error = coalesce(err, result.Error)
+                errOnce.Do(func() {
+                    firstErr = fmt.Errorf("aspect %s failed: %s", a.ID, se.Error)
+                })
+                bus.Publish(Event{Type: EventWorkflowFailed, Payload: se})
+            } else {
+                se.Status = StepCompleted
+                se.Result = &result
+                se.CompletedAt = time.Now()
+                bus.Publish(Event{Type: EventWorkflowStep, Payload: se})
+            }
+        }(aspect, agent, stepExec)
+    }
     wg.Wait()
+
+    if firstErr != nil {
+        exec.Status = WorkflowFailed
+        exec.FailureReason = firstErr.Error()
+        return exec, firstErr
+    }
+
+    exec.Status = WorkflowCompleted
+    exec.CompletedAt = time.Now()
+    return exec, nil
 }
 ```
 
@@ -1089,18 +1981,21 @@ gc agent list
 gc agent start <name>
 gc agent stop <name>
 gc agent attach <name>             # Interactive session (if runtime supports)
+gc agent restart <name> [--graceful]
 gc agent logs <name> [--follow]
 
 gc task list [--status=X]
 gc task create <title>
 gc task assign <task-id> <agent>
 gc task show <task-id>
+gc task retry <task-id>            # Re-queue a failed task
 
 gc mail send <to> -s "Subject" -m "Body"
 gc mail inbox [--all]
 gc mail read <id>
 
 gc workflow run <template>
+gc workflow plan <template>        # Dry-run: print execution graph without running
 gc workflow status
 gc workflow list
 
@@ -1111,7 +2006,8 @@ gc validate                        # Config validation with diagnostics
 gc migrate [--dry-run]             # Generate gas-city.toml from Gas Town workspace
 gc doctor                          # Health checks (extended from gt doctor)
 
-gc test-adapter <name>             # Run contract tests against an adapter
+gc test-adapter <name> [--config=c.toml]  # Run conformance suite against an adapter
+                                          # Returns 0 on success, prints failure report
 
 gc config show                     # Display resolved config
 gc version
@@ -1126,19 +2022,19 @@ Welcome to Gas City SDK!
 
 What kind of orchestration do you need?
 
-  ▸ Ralph         — Single agent with task loop (simplest)
-    Agent Teams   — Coordinator + worker pool
-    Gas Town      — Full multi-project orchestration
-    Custom        — Build your own topology
+  > Ralph         -- Single agent with task loop (simplest)
+    Agent Teams   -- Coordinator + worker pool
+    Gas Town      -- Full multi-project orchestration
+    Custom        -- Build your own topology
 
 Select [Ralph]:
 
 Which coding agent do you use?
 
-  ▸ Claude Code   — claude --dangerously-skip-permissions
-    Codex         — codex (OpenAI)
-    Gemini CLI    — gemini
-    Other         — Custom command
+  > Claude Code   -- claude --dangerously-skip-permissions
+    Codex         -- codex (OpenAI)
+    Gemini CLI    -- gemini
+    Other         -- Custom command
 
 Select [Claude Code]:
 
@@ -1153,14 +2049,14 @@ $ gc level
 
 Workspace "my-project" is at Level 3 (Worker Pool)
 
-  ✓ Level 0: Agent Runtime
-  ✓ Level 1: Work Tracking
-  ✓ Level 2: Task Loop
-  ✓ Level 3: Worker Pool       ← you are here
-  ○ Level 4: Messaging          — add [messaging] section
-  ○ Level 5: Workflows          — add [workflows] section
-  ○ Level 6: Health Monitoring  — add a supervisor agent
-  ○ Level 7: Multi-Project      — add 2+ projects with project-scoped agents
+  V Level 0: Agent Runtime
+  V Level 1: Work Tracking
+  V Level 2: Task Loop
+  V Level 3: Worker Pool       <- you are here
+  o Level 4: Messaging          -- add [messaging] section
+  o Level 5: Workflows          -- add [workflows] section
+  o Level 6: Health Monitoring  -- add a supervisor agent
+  o Level 7: Multi-Project      -- add 2+ projects with project-scoped agents
 ```
 
 ---
@@ -1169,51 +2065,121 @@ Workspace "my-project" is at Level 3 (Worker Pool)
 
 ### 12.1 Migration Algorithm
 
-```
-func Migrate(townRoot string) (*WorkspaceConfig, error) {
+```go
+func Migrate(townRoot string) (*MigrationReport, error) {
+    report := &MigrationReport{
+        SourceTown: townRoot,
+    }
     cfg := &WorkspaceConfig{}
+
+    // 0. Check for active sessions
+    activeSessions := detectActiveSessions(townRoot)
+    if len(activeSessions) > 0 {
+        report.Warnings = append(report.Warnings,
+            fmt.Sprintf("Found %d active tmux sessions. Run 'gt stop --all' first.",
+                len(activeSessions)))
+    }
 
     // 1. Read town identity
     town := readJSON(townRoot + "/mayor/town.json")
     cfg.Workspace.Name = town.Name
 
-    // 2. Read rig registry → projects
+    // 2. Read rig registry -> projects
     rigs := readJSON(townRoot + "/mayor/rigs.json")
-    for _, rig in rigs:
+    for _, rig := range rigs {
         cfg.Projects[rig.Name] = ProjectConfig{Repo: rig.URL}
+        report.Projects = append(report.Projects, ProjectMigration{
+            GasTownRig: rig.Name, Status: "migrated",
+        })
+    }
 
-    // 3. Read agent registries → agents
+    // 3. Read agent registries -> agents
     townAgents := readJSON(townRoot + "/settings/agents.json")
-    for _, agent in townAgents:
-        cfg.Agents = append(cfg.Agents, convertAgent(agent))
+    for _, agent := range townAgents {
+        converted, notes := convertAgent(agent)
+        cfg.Agents = append(cfg.Agents, converted)
+        report.Agents = append(report.Agents, AgentMigration{
+            GasTownRole: agent.Role,
+            GasCityRole: converted.Role,
+            Status:      "migrated",
+            Notes:       notes,
+        })
+    }
 
-    // 4. Map hardcoded roles → agent entries
+    // 4. Map hardcoded roles -> agent entries
     cfg.Agents = append(cfg.Agents, AgentEntry{Name: "coordinator", Role: "coordinator", Scope: "workspace"})
     cfg.Agents = append(cfg.Agents, AgentEntry{Name: "supervisor", Role: "supervisor", Scope: "workspace"})
-    for _, rig in rigs:
+    for _, rig := range rigs {
         cfg.Agents = append(cfg.Agents, AgentEntry{Name: "observer-" + rig.Name, Role: "observer", Scope: "project"})
         cfg.Agents = append(cfg.Agents, AgentEntry{Name: "integrator-" + rig.Name, Role: "integrator", Scope: "project"})
+    }
 
-    // 5. Read formulas → workflows
+    // 5. Read formulas -> workflows (with validation)
     formulas := readTOML(townRoot + "/.beads/formulas/*.toml")
     cfg.Workflows.TemplatesDir = "workflows/"
+    for _, formula := range formulas {
+        converted := convertFormula(formula) // {{rig}} -> {{project}}
+        if err := validateWorkflowTemplate(converted); err != nil {
+            report.Errors = append(report.Errors,
+                fmt.Sprintf("Formula %s: invalid conversion - %s", formula.ID, err))
+        }
+        report.Formulas = append(report.Formulas, FormulaMigration{
+            Source: formula.ID, Status: "migrated",
+        })
+    }
 
-    // 6. Set task and messaging backends
+    // 6. Flag hooks for manual review
+    hookFiles := scanHookFiles(townRoot)
+    for _, hf := range hookFiles {
+        report.Hooks = append(report.Hooks, HookMigration{
+            Source: hf,
+            Status: "requires_review",
+            Notes:  "Claude hooks should be reviewed and migrated to [agents.hooks]",
+        })
+    }
+
+    // 7. Set task and messaging backends
     cfg.Tasks = &TaskConfig{Backend: "beads"}
     cfg.Messaging = &MessagingConfig{Backend: "beads"}
 
-    return cfg, nil
+    report.TargetConfig = cfg
+    return report, nil
 }
 ```
 
-### 12.2 Compatibility Guarantees
+### 12.2 Migration Report
+
+The `gc migrate --dry-run` command outputs a structured report:
+
+```go
+type MigrationReport struct {
+    SourceTown   string
+    TargetConfig *WorkspaceConfig
+    Agents       []AgentMigration
+    Projects     []ProjectMigration
+    Formulas     []FormulaMigration
+    Hooks        []HookMigration
+    Warnings     []string  // Non-blocking issues
+    Errors       []string  // Blocking issues requiring manual fix
+}
+
+func (r *MigrationReport) Print(w io.Writer) {
+    // 1. Lists mapped agents (Gas Town Role -> Gas City Agent)
+    // 2. Lists config files sourced (town.json, rigs.json, etc.)
+    // 3. Flags "manual intervention needed" items (hooks, env vars)
+    // 4. Shows the resulting gas-city.toml content
+    // 5. Lists warnings and errors separately
+}
+```
+
+### 12.3 Compatibility Guarantees
 
 1. A Gas Town workspace without `gas-city.toml` continues to work with `gt` commands unchanged.
 2. `gc migrate --dry-run` generates the equivalent config without modifying anything.
 3. After migration, both `gt` and `gc` commands work (Gas Town compatibility mode persists).
 4. Migration is additive: it creates `gas-city.toml` but doesn't modify existing Gas Town configs.
 
-### 12.3 File-by-File Migration Map
+### 12.4 File-by-File Migration Map
 
 | Gas Town File | Migration Target | Notes |
 |--------------|-----------------|-------|
@@ -1221,8 +2187,8 @@ func Migrate(townRoot string) (*WorkspaceConfig, error) {
 | `mayor/rigs.json` | `[projects.*]` | One entry per rig |
 | `settings/agents.json` | `[[agents]]` entries | Agent configs with runtime_config |
 | `settings/config.json` | Various sections | Town settings spread across config sections |
-| `internal/config/roles/*.toml` | Built-in role behaviors | Not migrated — hardcoded in SDK |
-| `.beads/formulas/*.toml` | `workflows/*.toml` | Copy with variable renaming ({{rig}} → {{project}}) |
+| `internal/config/roles/*.toml` | Built-in role behaviors | Not migrated -- hardcoded in SDK |
+| `.beads/formulas/*.toml` | `workflows/*.toml` | Copy with variable renaming ({{rig}} -> {{project}}) |
 | `~/.gt/hooks-base.json` | Not migrated | Claude Code hooks remain managed by `gt hooks` |
 | `~/.gt/hooks-overrides/*.json` | `[agents.hooks]` | Flagged for manual migration |
 
@@ -1232,36 +2198,64 @@ func Migrate(townRoot string) (*WorkspaceConfig, error) {
 
 ### 13.1 Agent Address Format
 
-Gas City uses a simplified addressing scheme:
+Gas City uses a hierarchical addressing scheme with two layers:
 
+**Logical identity** (stable across restarts):
 ```
 <workspace>/<agent-name>
 <workspace>/<project>/<agent-name>
-<workspace>/<project>/<agent-name>/<instance-id>
+<workspace>/<project>/<agent-name>[<instance>]
+```
+
+**Runtime handle** (transient, changes on restart):
+```
+<handle-uuid>
 ```
 
 Examples:
 ```
 my-town/coordinator          # Workspace-scoped agent
 my-town/gastown/observer     # Project-scoped agent
-my-town/gastown/workers/a3f  # Specific worker instance
+my-town/gastown/workers[2]   # Specific pool instance
 ```
 
 ### 13.2 Identity Resolution
 
 ```go
-func ResolveAgent(address string) (*AgentHandle, error) {
+// AgentRegistry tracks logical identities and their current runtime handles.
+type AgentRegistry struct {
+    mu         sync.RWMutex
+    identities map[string]*AgentHandle  // logical address -> current handle
+    handles    map[string]string        // handle ID -> logical address
+    stateDir   string                   // .gc/agents/ for persistence
+}
+
+func (r *AgentRegistry) Register(handle *AgentHandle) {
+    r.mu.Lock()
+    defer r.mu.Unlock()
+    addr := handle.Identity.String()
+    r.identities[addr] = handle
+    r.handles[handle.ID] = addr
+    r.persist(handle)  // Write to .gc/agents/<addr>.json for crash recovery
+}
+
+func (r *AgentRegistry) Resolve(address string) (*AgentHandle, error) {
+    r.mu.RLock()
+    defer r.mu.RUnlock()
+
     parts := strings.Split(address, "/")
     switch len(parts) {
     case 2:
-        // workspace/agent — workspace-scoped agent
-        return registry.FindByName(parts[1])
+        // workspace/agent -- workspace-scoped agent
+        return r.identities[address], nil
     case 3:
-        // workspace/project/agent — project-scoped agent
-        return registry.FindByNameAndProject(parts[2], parts[1])
-    case 4:
-        // workspace/project/agent/instance — specific pool instance
-        return registry.FindByInstance(parts[3])
+        // workspace/project/agent -- project-scoped agent
+        // Check for instance syntax: "workers[2]"
+        name, instance := parseInstance(parts[2])
+        if instance >= 0 {
+            return r.identities[fmt.Sprintf("%s/%s/%s[%d]", parts[0], parts[1], name, instance)], nil
+        }
+        return r.identities[address], nil
     default:
         return nil, fmt.Errorf("invalid address: %s", address)
     }
@@ -1271,10 +2265,10 @@ func ResolveAgent(address string) (*AgentHandle, error) {
 ### 13.3 Backward Compatibility with Gas Town Addresses
 
 Gas Town uses `gastown/polecats/Toast` format. The migration layer maps:
-- `<rig>/polecats/<name>` → `<workspace>/<project>/workers/<instance>`
-- `<rig>/crew/<name>` → `<workspace>/<project>/<name>`
-- `mayor` → `<workspace>/coordinator`
-- `deacon` → `<workspace>/supervisor`
+- `<rig>/polecats/<name>` -> `<workspace>/<project>/workers[<instance>]`
+- `<rig>/crew/<name>` -> `<workspace>/<project>/<name>`
+- `mayor` -> `<workspace>/coordinator`
+- `deacon` -> `<workspace>/supervisor`
 
 ---
 
@@ -1290,26 +2284,41 @@ type HookExecutor struct {
 }
 
 func (h *HookExecutor) Run() {
-    events := h.bus.Subscribe()
-    for event := range events {
-        configs, ok := h.hooks[event.Type]
-        if !ok {
-            continue
-        }
-        for _, cfg := range configs {
+    events := h.bus.Subscribe(h)  // HookExecutor is a critical subscriber
+    // Events delivered via OnEvent callback
+}
+
+func (h *HookExecutor) OnEvent(event Event) error {
+    configs, ok := h.hooks[event.Type]
+    if !ok {
+        return nil
+    }
+    for _, cfg := range configs {
+        if cfg.Critical {
+            // Critical hooks run synchronously — failure propagates through event bus
+            if err := h.executeHookSync(cfg, event); err != nil {
+                return fmt.Errorf("critical hook %s failed: %w", cfg.Command, err)
+            }
+        } else {
+            // Best-effort hooks run asynchronously
             go h.executeHook(cfg, event)
         }
     }
+    return nil
 }
 
-func (h *HookExecutor) executeHook(cfg HookConfig, event Event) {
+func (h *HookExecutor) IsCritical() bool { return true }
+
+func (h *HookExecutor) executeHookSync(cfg HookConfig, event Event) error {
     cmd := expandTemplate(cfg.Command, event)
     ctx, cancel := context.WithTimeout(context.Background(), h.timeout)
     defer cancel()
+    return exec.CommandContext(ctx, "sh", "-c", cmd).Run()
+}
 
-    result := exec.CommandContext(ctx, "sh", "-c", cmd).Run()
-    if result != nil {
-        log.Warn("hook failed", "event", event.Type, "error", result)
+func (h *HookExecutor) executeHook(cfg HookConfig, event Event) {
+    if err := h.executeHookSync(cfg, event); err != nil {
+        log.Warn("hook failed", "event", event.Type, "error", err)
     }
 }
 ```
@@ -1335,22 +2344,26 @@ func (h *HookExecutor) executeHook(cfg HookConfig, event Event) {
 | Subsystem | What It Tests | Mock Boundary |
 |-----------|-------------|---------------|
 | Config parser | TOML parsing, level detection, validation rules | Filesystem (embed test TOML) |
-| Adapter registry | Registration, lookup, unknown adapter error | None (pure logic) |
-| Pool manager | Scale up/down, min/max bounds, idle timeout | RuntimeAdapter mock |
-| Task loop | Cycle execution, clear context, stall handling | RuntimeAdapter + TaskBackend mocks |
-| Startup sequencer | Priority grouping, parallel start, failure handling | RuntimeAdapter mock |
-| Shutdown sequencer | Reverse ordering, graceful timeout escalation | RuntimeAdapter mock |
-| Event bus | Publish/subscribe, slow subscriber drop, replay | None (pure concurrency) |
+| Adapter registry | Registration, lookup, unknown adapter error, thread safety | None (pure logic) |
+| Pool manager | Scale up/down, min/max bounds, idle timeout, scale-down races | RuntimeAdapter mock |
+| Task loop | Cycle execution, clear context, stall handling, claim races | RuntimeAdapter + TaskBackend mocks |
+| Startup sequencer | DAG resolution, parallel start, failure rollback, cycle detection | RuntimeAdapter mock |
+| Shutdown sequencer | Reverse ordering, graceful timeout escalation, shuttingDown flag | RuntimeAdapter mock |
+| Event bus | Publish/subscribe, critical vs optional tiers, replay, unsubscribe | None (pure concurrency) |
 | Hook executor | Template expansion, timeout, error handling | EventBus (inject events) |
-| Identity resolver | Address parsing, backward compatibility | None (pure logic) |
-| Migration | Town→City config conversion, edge cases | Filesystem (test fixtures) |
+| Identity resolver | Address parsing, backward compatibility, persistence | None (pure logic) |
+| Migration | Town->City config conversion, edge cases, report generation | Filesystem (test fixtures) |
+| Workflow executor | Sequential/parallel execution, timeout, retry, failure strategies | RuntimeAdapter mock |
+| Task backend | Claim atomicity, optimistic locking, status transitions | None (filesystem backend with temp dirs) |
 
 ### 15.2 Contract Tests
 
-Every RuntimeAdapter passes the same contract test suite:
+The `gc test-adapter` command runs this suite against any registered adapter. This allows custom adapter authors to certify compliance with the Gas City spec.
 
 ```go
 func RunAdapterContractTests(t *testing.T, adapter RuntimeAdapter, cfg AgentConfig) {
+    // === Happy path tests ===
+
     t.Run("Start returns valid handle", func(t *testing.T) {
         handle, err := adapter.Start(ctx, cfg)
         require.NoError(t, err)
@@ -1374,7 +2387,7 @@ func RunAdapterContractTests(t *testing.T, adapter RuntimeAdapter, cfg AgentConf
         }, 30*time.Second, 1*time.Second)
     })
 
-    t.Run("Double Stop is idempotent", func(t *testing.T) {
+    t.Run("Double Stop is idempotent (P1)", func(t *testing.T) {
         handle, _ := adapter.Start(ctx, cfg)
         require.NoError(t, adapter.Stop(handle, true))
         require.NoError(t, adapter.Stop(handle, true))  // No error
@@ -1389,7 +2402,7 @@ func RunAdapterContractTests(t *testing.T, adapter RuntimeAdapter, cfg AgentConf
         require.Contains(t, output, "test-message")
     })
 
-    t.Run("Ping within timeout", func(t *testing.T) {
+    t.Run("Ping within timeout (P2)", func(t *testing.T) {
         handle, _ := adapter.Start(ctx, cfg)
         defer adapter.Stop(handle, true)
         waitForRunning(t, adapter, handle)
@@ -1399,7 +2412,7 @@ func RunAdapterContractTests(t *testing.T, adapter RuntimeAdapter, cfg AgentConf
         require.Less(t, result.Latency, cfg.Health.PingTimeout)
     })
 
-    t.Run("Attach matches SupportsAttach", func(t *testing.T) {
+    t.Run("Attach matches SupportsAttach (P3)", func(t *testing.T) {
         handle, _ := adapter.Start(ctx, cfg)
         defer adapter.Stop(handle, true)
         if adapter.SupportsAttach() {
@@ -1410,7 +2423,7 @@ func RunAdapterContractTests(t *testing.T, adapter RuntimeAdapter, cfg AgentConf
         }
     })
 
-    t.Run("Concurrent access is safe", func(t *testing.T) {
+    t.Run("Concurrent access is safe (P5)", func(t *testing.T) {
         handle, _ := adapter.Start(ctx, cfg)
         defer adapter.Stop(handle, true)
         waitForRunning(t, adapter, handle)
@@ -1423,6 +2436,53 @@ func RunAdapterContractTests(t *testing.T, adapter RuntimeAdapter, cfg AgentConf
         }
         wg.Wait()
     })
+
+    t.Run("Start creates unique handles (P6)", func(t *testing.T) {
+        h1, _ := adapter.Start(ctx, cfg)
+        h2, _ := adapter.Start(ctx, cfg)
+        defer adapter.Stop(h1, true)
+        defer adapter.Stop(h2, true)
+        require.NotEqual(t, h1.ID, h2.ID)
+    })
+
+    // === Error path tests ===
+
+    t.Run("Nudge on stopped agent returns error", func(t *testing.T) {
+        handle, _ := adapter.Start(ctx, cfg)
+        adapter.Stop(handle, true)
+        err := adapter.Nudge(handle, "should-fail")
+        require.Error(t, err)
+    })
+
+    t.Run("SendInput on stopped agent returns error", func(t *testing.T) {
+        handle, _ := adapter.Start(ctx, cfg)
+        adapter.Stop(handle, true)
+        err := adapter.SendInput(handle, "should-fail")
+        require.Error(t, err)
+    })
+
+    t.Run("GetState on stopped agent returns Stopped", func(t *testing.T) {
+        handle, _ := adapter.Start(ctx, cfg)
+        adapter.Stop(handle, true)
+        state, err := adapter.GetState(handle)
+        require.NoError(t, err)
+        require.Equal(t, StatusStopped, state.Status)
+    })
+
+    t.Run("WaitForResult returns after assign", func(t *testing.T) {
+        handle, _ := adapter.Start(ctx, cfg)
+        defer adapter.Stop(handle, true)
+        waitForRunning(t, adapter, handle)
+
+        task := TaskDescriptor{ID: "test-1", Title: "Test task", Description: "echo hello"}
+        require.NoError(t, adapter.Assign(handle, task))
+
+        ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+        defer cancel()
+        result, err := adapter.WaitForResult(ctx, handle)
+        require.NoError(t, err)
+        require.NotEmpty(t, result.TaskID)
+    })
 }
 ```
 
@@ -1430,26 +2490,30 @@ func RunAdapterContractTests(t *testing.T, adapter RuntimeAdapter, cfg AgentConf
 
 | Test | What It Validates | Prerequisites |
 |------|-------------------|---------------|
-| Claude-code adapter roundtrip | Start → Nudge → CaptureOutput → Stop | tmux, claude CLI |
-| Subprocess adapter roundtrip | Start → SendInput → ReadOutput → Stop | None |
-| Config → startup → shutdown | Parse TOML → start all → verify → stop all | claude CLI |
-| Ralph smoke test | Single agent processes one task end-to-end | claude CLI, task backend |
+| Claude-code adapter roundtrip | Start -> Assign -> WaitForResult -> Stop | tmux, claude CLI |
+| Subprocess adapter roundtrip | Start -> SendInput -> ReadOutput -> Stop | None |
+| Config -> startup -> shutdown | Parse TOML -> start all -> verify -> stop all -> verify clean | claude CLI |
+| Ralph smoke test | Single agent processes one task end-to-end via Claim() | claude CLI, task backend |
 | Agent Teams smoke test | Coordinator dispatches task to worker pool | claude CLI, task backend |
-| Migration test | Existing Gas Town workspace → gc migrate → verify config | Gas Town workspace fixture |
-| Level progression | Level 0 → 7 configs all start correctly | claude CLI |
+| Migration test | Existing Gas Town workspace -> gc migrate -> verify config + report | Gas Town workspace fixture |
+| Level progression | Level 0 -> 7 configs all start correctly | claude CLI |
+| Startup rollback | Fail agent 3 of 5 -> verify agents 1-2 stopped | RuntimeAdapter mock |
+| Claim concurrency | 5 agents race to Claim() same task -> only 1 wins | Filesystem backend |
+| Event bus tiers | Critical subscriber blocks, optional doesn't | None |
+| Workflow failure | Step 2 fails -> verify strategy (fail/skip/retry) | RuntimeAdapter mock |
 
 ### 15.4 Acceptance Criteria per Implementation Phase
 
 | Phase | Acceptance Criteria |
 |-------|-------------------|
-| 1: Runtime Abstraction | All existing Gas Town tests pass with adapter wrapper. `gc agent start/stop/status` work. Contract tests pass for `claude-code` adapter. |
-| 2: Config Parser | `gc validate` accepts all 8 levels. `gc level` reports correct level. `gc init` generates valid configs for all 3 shapes. |
-| 3: Task System | `gc task create/list/assign` work with filesystem backend. Task loop runs for Ralph shape. |
-| 4: Pool Manager | Agent Teams shape starts. Pool scales between min and max. Workers are created/destroyed. |
-| 5: Messaging | `gc mail send/inbox` work. Direct messages and channels deliver. |
-| 6: Workflows | `gc workflow run` executes sequential and parallel templates. |
-| 7: Health Monitor | Supervisor detects stalled agents. Automatic restart with cooldown. |
-| 8: Full Gas Town | Level 7 config starts all agents. Equivalent behavior to current Gas Town. |
+| 1: Runtime Abstraction | All existing Gas Town tests pass with adapter wrapper. `gc agent start/stop/status` work. Contract tests pass for `claude-code` adapter. `WaitForResult()` returns `TaskResult`. |
+| 2: Config Parser | `gc validate` accepts all 8 levels. `gc level` reports correct level. `gc init` generates valid configs for all 3 shapes. `depends_on` cycle detection works. Runtime auto-detection works. |
+| 3: Task System | `gc task create/list/assign` work with filesystem backend. Task loop runs for Ralph shape. `Claim()` is atomic. Optimistic locking prevents stale updates. |
+| 4: Pool Manager | Agent Teams shape starts. Pool scales between min and max. Scale-down respects mutex. Readiness probes used when available. |
+| 5: Messaging | `gc mail send/inbox` work. Direct messages and channels deliver. TTL expiration works. Ordering guarantees hold. |
+| 6: Workflows | `gc workflow run` executes sequential and parallel templates. Timeout, retry, skip strategies work. Failure produces `WorkflowExecution` report. |
+| 7: Health Monitor | Supervisor detects stalled agents (with progress-aware detection). Automatic restart with cooldown. Shutdown flag prevents restart during shutdown. |
+| 8: Full Gas Town | Level 7 config starts all agents with DAG ordering. Migration generates valid config + report. Equivalent behavior to current Gas Town. |
 
 ---
 
@@ -1460,94 +2524,98 @@ func RunAdapterContractTests(t *testing.T, adapter RuntimeAdapter, cfg AgentConf
 **Goal:** Extract the `claude-code` adapter from Gas Town's existing tmux code without changing behavior.
 
 **Deliverables:**
-- `internal/runtime/adapter.go` — RuntimeAdapter interface
-- `internal/runtime/registry.go` — Adapter registry
-- `internal/runtime/claude_code/` — Claude Code adapter wrapping `internal/tmux/`
-- `internal/runtime/subprocess/` — Generic subprocess adapter
+- `internal/runtime/adapter.go` -- RuntimeAdapter interface + ReadinessProbe
+- `internal/runtime/registry.go` -- Thread-safe adapter registry
+- `internal/runtime/types.go` -- AgentHandle, AgentIdentity, AgentConfig, TaskResult
+- `internal/runtime/claude_code/` -- Claude Code adapter wrapping `internal/tmux/`
+- `internal/runtime/subprocess/` -- Generic subprocess adapter
 - Contract test suite in `internal/runtime/contract_test.go`
 - `gc agent start/stop/status` commands
 
-**Acceptance:** All existing Gas Town tests pass. Contract tests pass for both adapters.
+**Acceptance:** All existing Gas Town tests pass. Contract tests (happy + error paths) pass for both adapters.
 
 ### Phase 2: Config Parser + CLI Foundation (1-2 weeks)
 
 **Goal:** Parse `gas-city.toml`, detect levels, validate, and provide `gc init` + `gc level` + `gc validate`.
 
 **Deliverables:**
-- `internal/config/gas_city.go` — TOML parser with level detection
-- `internal/config/validate.go` — Validation rules
+- `internal/config/gas_city.go` -- TOML parser with level detection (monotonic guards)
+- `internal/config/validate.go` -- Validation rules including dependency cycle detection
+- `internal/config/autodetect.go` -- Runtime auto-detection
 - `gc init`, `gc level`, `gc validate`, `gc config show` commands
 - Test fixtures for all 8 levels
 
-**Acceptance:** All validation rules enforced. Level detection correct. Init wizard generates valid configs.
+**Acceptance:** All validation rules enforced. Level detection correct with monotonic progression. Init wizard generates valid configs. Dependency cycles detected.
 
 ### Phase 3: Task System + Ralph Shape (2 weeks)
 
 **Goal:** Task backend interface + filesystem backend + task loop = working Ralph.
 
 **Deliverables:**
-- `internal/tasks/backend.go` — TaskBackend interface
-- `internal/tasks/filesystem/` — Filesystem backend
-- `internal/tasks/beads/` — Beads backend adapter
-- `internal/loop/` — Task loop controller
-- `gc task create/list/assign/show` commands
+- `internal/tasks/backend.go` -- TaskBackend interface with Claim()
+- `internal/tasks/filesystem/` -- Filesystem backend with flock-based Claim()
+- `internal/tasks/beads/` -- Beads backend adapter
+- `internal/loop/` -- Task loop controller using atomic Claim
+- `gc task create/list/assign/show/retry` commands
 
-**Acceptance:** Ralph shape processes tasks end-to-end. Task loop handles stalls and restarts.
+**Acceptance:** Ralph shape processes tasks end-to-end. Claim() is atomic (concurrent test passes). Optimistic locking prevents stale updates.
 
 ### Phase 4: Pool Manager + Agent Teams Shape (2 weeks)
 
 **Goal:** Pool management + coordinator dispatch = working Agent Teams.
 
 **Deliverables:**
-- `internal/pool/` — Pool manager with min/max/idle-timeout
-- Startup/shutdown sequencer in `internal/orchestration/`
+- `internal/pool/` -- Pool manager with synchronized scale-down
+- Startup/shutdown sequencer with DAG ordering and rollback in `internal/orchestration/`
+- Agent registry with persistence in `internal/registry/`
 - Coordinator role behavior
 
-**Acceptance:** Pool scales correctly. Agent Teams shape dispatches tasks to workers.
+**Acceptance:** Pool scales correctly with mutex protection. Startup rollback on failure works. Agent Teams shape dispatches tasks to workers.
 
 ### Phase 5: Messaging + Workflows (1-2 weeks)
 
 **Goal:** Inter-agent messaging and workflow template execution.
 
 **Deliverables:**
-- `internal/messaging/backend.go` — MessageBackend interface
-- `internal/messaging/filesystem/` — Filesystem backend
-- `internal/workflows/` — Workflow template parser and executor
+- `internal/messaging/backend.go` -- MessageBackend interface with delivery guarantees
+- `internal/messaging/filesystem/` -- Filesystem backend
+- `internal/workflows/` -- Workflow template parser and executor with strategy support
 - `gc mail` and `gc workflow` commands
 
-**Acceptance:** Direct messages and channels work. Sequential and parallel workflows execute.
+**Acceptance:** Direct messages and channels work with ordering. Sequential and parallel workflows execute with timeout/retry/skip strategies.
 
 ### Phase 6: Health Monitoring + Event Bus (1-2 weeks)
 
-**Goal:** Supervisor patrol cycle + event bus + lifecycle hooks.
+**Goal:** Supervisor patrol cycle + tiered event bus + lifecycle hooks.
 
 **Deliverables:**
-- `internal/events/bus.go` — Event bus
-- `internal/health/supervisor.go` — Supervisor patrol cycle
-- `internal/hooks/executor.go` — Lifecycle hook executor
+- `internal/events/bus.go` -- Tiered event bus (critical + optional subscribers)
+- `internal/health/supervisor.go` -- Progress-aware supervisor patrol cycle
+- `internal/hooks/executor.go` -- Lifecycle hook executor (critical subscriber)
 - `gc activity` and `gc stats` commands
 
-**Acceptance:** Stalled agents detected and restarted. Events published. Hooks fire.
+**Acceptance:** Stalled agents detected (progress-aware). Events never dropped for critical subscribers. Hooks fire. Shutdown flag prevents restart during shutdown.
 
 ### Phase 7: Migration + Gas Town Shape (2 weeks)
 
-**Goal:** Full Gas Town shape + migration tooling.
+**Goal:** Full Gas Town shape + migration tooling with detailed reporting.
 
 **Deliverables:**
-- `internal/migration/` — Gas Town → Gas City migration
-- `gc migrate` command with `--dry-run`
-- Level 7 config with all role behaviors
+- `internal/migration/` -- Gas Town -> Gas City migration with MigrationReport
+- `gc migrate` command with `--dry-run` and structured report output
+- Level 7 config with all role behaviors and DAG dependencies
 - Observer, integrator, service role behaviors
 
-**Acceptance:** `gc migrate --dry-run` generates correct config from Gas Town workspace. Gas Town shape starts all agents.
+**Acceptance:** `gc migrate --dry-run` generates correct config + report from Gas Town workspace. Report surfaces hooks/env-vars needing manual review. Gas Town shape starts all agents with DAG ordering.
 
-### Phase 8: Additional Adapters (ongoing)
+### Phase 8: Additional Adapters + Conformance CLI (ongoing)
 
-**Goal:** Codex, Gemini, Agent SDK, Docker adapters.
+**Goal:** Codex, Gemini, Agent SDK, Docker adapters + `gc test-adapter`.
 
 **Deliverables:**
 - Per-adapter package in `internal/runtime/`
-- Contract tests passing for each
+- Contract tests passing for each (happy + error paths)
+- `gc test-adapter <name>` CLI command for ecosystem certification
 
 ---
 
@@ -1573,36 +2641,49 @@ func RunAdapterContractTests(t *testing.T, adapter RuntimeAdapter, cfg AgentConf
 Let `C(n)` be the set of config sections valid at level `n`. The progressive model guarantees:
 
 ```
-∀ n ∈ [0,7]: C(n) ⊂ C(n+1)
+forall n in [0,7]: C(n) is a subset of C(n+1)
 ```
 
-**Proof sketch:** Each level adds a new optional config section ([tasks], [messaging], etc.) without modifying the schema of lower-level sections. The config parser accepts any superset of a valid config. Adding a section maps to a new level; it never invalidates existing sections.
+**Proof:** Each level adds a new optional config section ([tasks], [messaging], etc.) without modifying the schema of lower-level sections. The config parser accepts any superset of a valid config. Formally:
+- *Additive-only schema evolution:* Let `S(n)` be the set of valid config fields at level `n`. Level `n+1` adds fields but never removes or redefines fields from level `n`. Thus `S(n) ⊂ S(n+1)`.
+- *Independent usefulness:* A config at level `n` is valid and functional without any level `n+1` features. The level detection function returns `n` (not `n+1`) when level `n+1` sections are absent. Every level enables at least one new CLI command or capability.
+- *Backward compatibility:* A tool built for level `n` works correctly on any config at level `m >= n` — it ignores unrecognized sections via the TOML parser's permissive behavior.
 
-### 18.2 Startup Ordering
+### 18.2 Startup Ordering (DAG)
 
-For agents `a` and `b` with `priority(a) < priority(b)`:
+For agents `a` and `b` where `a` is in `b.depends_on`:
 
 ```
-IsRunning(a) = true → Start(b) is called
+IsRunning(a) = true -> Start(b) is called
 ```
 
-This is enforced by the sequencer's `sync.WaitGroup` barrier between priority groups.
+This is enforced by the topological group algorithm: agents in the same group have no inter-dependencies and start in parallel; groups execute sequentially.
+
+**Cycle prevention:** The config validator rejects any `depends_on` graph containing cycles via DFS-based cycle detection at parse time.
 
 ### 18.3 Pool Bounds
 
 For a pool with config `{min: M, max: N}`, at any time `t`:
 
 ```
-M ≤ |running_instances(t)| ≤ N
+M <= |running_instances(t)| <= N
 ```
 
-**Invariant enforcement:** The PoolManager is the sole creator/destroyer of pool instances. It checks bounds before every scale operation:
+**Invariant enforcement:** The PoolManager holds `mu` during all scale operations, serializing scale-up/down with task dispatch. It checks bounds before every scale operation:
 - `scaleUp`: `if running < N then spawn(min(needed, N - running))`
-- `scaleDown`: `if idle > M then kill(idle - M)`
+- `scaleDown`: `if idle > M then kill(idle - M)` (with double-check after lock)
 
 ### 18.4 Event Bus Liveness
 
-Every event published to the bus is delivered to every subscriber with a non-full channel within one bus cycle (< 1ms under normal load). Events are dropped for slow subscribers (channel full) to prevent backpressure from stalling the bus. The ring buffer provides replay capability for up to 10,000 events.
+Every event published to the bus is delivered to every critical subscriber synchronously (blocking). Optional subscribers receive events asynchronously. Critical events (agent crashes, task failures) are guaranteed not to be dropped by using the critical tier.
+
+### 18.5 Task Claim Atomicity
+
+For any task `t` with `Status = Ready`, at most one agent can successfully call `Claim(t.id, agent)` and receive `true`. All other concurrent claims receive `false`. This is enforced by backend-specific atomic operations (SQL transactions for beads, flock for filesystem, label-then-verify for GitHub).
+
+### 18.6 Startup Rollback Safety
+
+If `StartWorkspace()` fails at agent `k` of `n`, agents `1..k-1` are stopped in reverse order. The workspace returns to a clean state with no running agents. Formally: if `Start(agent_k)` fails, then `forall i < k: IsRunning(agent_i) = false` after rollback completes.
 
 ---
 
@@ -1612,8 +2693,8 @@ Every event published to the bus is delivered to every subscriber with a non-ful
 
 2. **Config hot-reload.** Can you add agents to a running workspace? v1: no (requires restart). v2: yes (via file watch + diff).
 
-3. **Multi-runtime task serialization.** When results cross runtimes (Claude Code coordinator → Codex worker), the standard TaskResult schema (Section 8) provides the bridge. Validate in Phase 4.
+3. **Multi-runtime task serialization.** When results cross runtimes (Claude Code coordinator -> Codex worker), the `TaskResult` schema (Section 2.3) provides the bridge. Adapters normalize their output into this structure. Validate in Phase 4.
 
-4. **State persistence across restarts.** Claude-code uses tmux session survival + `/resume`. Other runtimes need checkpoint files. Define `StateCheckpoint` interface in Phase 3.
+4. **State persistence across restarts.** Claude-code uses tmux session survival + `/resume`. Other runtimes need checkpoint files. The `AgentRegistry` persists logical identities to `.gc/agents/` for crash recovery. Define `StateCheckpoint` interface in Phase 3.
 
 5. **`gc` vs `gt` CLI namespace.** Options: (a) `gc` is a separate binary, (b) `gt gc` subcommand, (c) `gt` detects Gas City mode and adjusts behavior. Recommendation: (a) separate binary for clarity.

@@ -248,3 +248,283 @@ exec
 | Agent Teams smoke test | Coordinator dispatches task to worker pool | claude CLI, task backend |
 | Migration test | Existing Gas Town workspace → gc migrate → verify config | Gas Town workspace fixture |
 | Level progression | Level 0 → 7 configs all start correctly | claude CLI |
+
+
+
+
+
+
+
+
+
+
+thinking
+**Planning change details**
+
+I should include several elements for each proposed change: a description of the change, and a detailed analysis covering aspects like architecture, reliability, and performance. 
+
+I’m also thinking about how to present the git-diff style changes compared to the original plan. The user might want unified diffs with context lines but they've specifically asked for a per-change diff snippet. 
+
+So I’ll organize each change with its own diff chunk, ensuring clarity and coherence throughout.
+thinking
+**Evaluating patch changes**
+
+I’m considering showing patch fragments with context instead of including the entire file. I need to decide on providing around 10-15 changes, each with corresponding patch snippets that address relevant sections. Given the plan's size, I want to highlight key modifications like restructuring the runtime interface, fixing concurrency issues, introducing state management, and enhancing security.
+
+For instance, the RuntimeAdapter interface is quite broad and may violate interface segregation principles. I'll evaluate each aspect carefully for a robust architecture.
+thinking
+**Considering context passing**
+
+I think I might need to implement context passing. The AgentHandle includes metadata like PID but is missing an "instance id." It could benefit from including workspace or project details, alongside the existing "Project" string. Also, the handle has an `Agent` name from config, but the `Name` field might create confusion.
+
+When it comes to adapter correctness, it’s good that the P2 ensures liveness after starting with a ping timeout. However, is it worth considering making the Start function idempotent and supporting session recovery or resumption? Many agent CLIs have similar functionalities.
+thinking
+**Addressing state persistence**
+
+I need to ensure state persistence across restarts. 
+
+The built-in runtime adapters table includes `codex` with subprocess, but it might not function well with CLI and could require support for interactive conversations and file editing. The "agent-sdk" uses file-based IPC, but the plan doesn't account for a web dashboard or remote access, which is okay for now. Docker implies strong isolation, yet I need details on volumes for better understanding.
+
+The adapter registry currently uses a global map that requires synchronization. 
+
+Regarding the config schema, I think there are errors with TOML. The `[[agents]]` array of tables is ambiguous because `[agents.runtime_config]` should define a nested table; this needs clarification on how to structure it properly.
+thinking
+**Examining config schema and task management**
+
+I think in TOML v1.0, defining `[[products]]` can allow `[products.discount]` to attach to the last element, which seems valid. However, confusion arises with repeated `[agents.pool]` as it attaches to the last `[agents]`. Each pool should follow its corresponding agent. The config also uses `[projects.<name>]` correctly. However, the level detection function’s logic is puzzling; starting levels at 0 without checking for any agents could be misleading.
+
+When it comes to the progressive capability model, levels 2 and 3 are absent from the schema, potentially creating inconsistencies. The task loop algorithm raises questions about task assignment and state management, which could risk coupling the runtime too tightly to the task backend, when they should remain separate. 
+
+The agent team's scaling algorithm and the startup sequencer have missing details, particularly task assignment and potential deadlines. Lastly, the event bus design could face issues with dropping important events, so ensuring reliable subscribers and backpressure measures would be essential.
+thinking
+**Analyzing event bus and task management**
+
+The event bus's `Subscribe` method returns a channel but lacks an unsubscribe feature, risking memory leaks. The design should specify concurrency models more clearly since the current approach creates bugs. Additionally, health monitoring needs a persistent state due to various edge cases in agent handling.
+
+Task systems require atomic operations to prevent multiple agents from claiming the same task, and it would help to incorporate additional statuses and results for better management. Built-in backends need clear status mappings, and messaging interfaces must unify with the event bus for better functionality. 
+
+Workflow templates and the CLI also need refinement to improve user experience and integrate better with task backends. Finally, testing approaches should be more robust, accommodating the nuances of different runtimes, especially for contract tests.
+thinking
+**Proposing architectural improvements**
+
+I see several open questions about the project, such as the out-of-process adapter protocol and state persistence. To improve the project, I should consider key revisions like rethinking the architecture by splitting the runtime adapter into smaller interfaces, introducing a `RuntimeManager`, and adding a central state store for workspace data.
+
+I also want to introduce concurrency measures, task result schemas, and isolation for ephemeral workers. Additionally, I could suggest enhancements for health monitoring, observability, and security features. Finally, I need to prepare a diff-style modification plan, detailing each proposed change with rationale and code snippets for clarity.
+thinking
+**Identifying gaps in the architecture plan**
+
+I'm noticing several areas in the plan that need attention, particularly regarding clarity and consistency. For instance, the levels 0-7 in the capability model aren't clearly defined in the schema, and some levels are missing from the configuration. 
+
+I also see gaps related to merge processing for the integrator role, milestone configurations, and the need for a project field in the tasks backend. There are issues around ephemeral agent isolation and how to set up work directories, along with missing standardization for runtime prompts. 
+
+Further, performance concerns emerged regarding logging methods and output capture. Lastly, the plan lacks specific algorithm descriptions for coordinator and observer roles. I think these improvements can enhance the robustness of the architecture.
+thinking
+**Proposing changes for plan improvements**
+
+I see some gaps in the current plan, particularly around health monitoring and event bus logic not being clearly specified per role. To address this, I’m proposing the addition of a “Role Engine” and “Role Packs” with default behaviors.
+
+There's also a need for a standard `TaskResult` schema for multi-runtime scenarios, along with improved state persistence and checkpoint integration. Furthermore, to enhance performance and reliability, I suggest introducing a `gc supervisor` to manage tasks and loops effectively. I'll outline the proposed changes using a structured diff style to provide clear insights.
+thinking
+**Gathering line numbers for context**
+
+I’m planning to run some commands to get exact line numbers and text from the plan without modifying it, just to ensure the diff context is accurate. Using `nl -ba PLAN.md | sed -n '40,120p'` will help extract the relevant ranges. It seems like running multiple commands at once could be faster, so I could explore using `multi_tool_use.parallel` for higher efficiency. I want to gather the necessary context to properly reference the exact lines for my planned changes. Let's start with the runtime adapter interface around line 49.
+exec
+/bin/zsh -lc "cd /Users/csells/Code/Forks/steveyegge/gastown/gas-city-sdk-spec-forge && nl -ba PLAN.md | sed -n '40,120p'" in /Users/csells/Code/Forks/steveyegge/gastown/gas-city-sdk-spec-forge succeeded in 52ms:
+    40	
+    41	Every interaction Gas Town performs with an agent — starting, stopping, sending work, reading output, health-checking — currently flows through `internal/tmux/tmux.go`. This creates three problems:
+    42	
+    43	1. **Runtime lock-in**: You can't use Codex, Gemini, or Agent SDK without rewriting the session layer
+    44	2. **Environment lock-in**: You can't run without tmux (containers, CI, headless servers)
+    45	3. **Observation lock-in**: Monitoring depends on tmux `capture-pane` output scraping
+    46	
+    47	The Agent Runtime abstraction separates **what you do with an agent** from **how a specific agent implementation works**.
+    48	
+    49	### 2.2 The RuntimeAdapter Interface
+    50	
+    51	```go
+    52	// RuntimeAdapter is the interface every agent runtime must implement.
+    53	// It is the foundational abstraction of the Gas City SDK.
+    54	type RuntimeAdapter interface {
+    55	    // Identity
+    56	    Name() string  // e.g., "claude-code", "codex", "subprocess"
+    57	
+    58	    // Lifecycle
+    59	    Start(ctx context.Context, config AgentConfig) (AgentHandle, error)
+
+thinking
+**Gathering config details**
+
+I see that we should gather line numbers for the config schema section, particularly around line 282 and possibly from 280 to 410. This will help us pinpoint the necessary details in that portion. I'll make sure to note down these line numbers so we can refer back to them as needed. It seems like organizing this information will be really helpful moving forward. Let's get this sorted!
+exec
+/bin/zsh -lc "cd /Users/csells/Code/Forks/steveyegge/gastown/gas-city-sdk-spec-forge && nl -ba PLAN.md | sed -n '260,420p'" in /Users/csells/Code/Forks/steveyegge/gastown/gas-city-sdk-spec-forge succeeded in 52ms:
+   260	    "agent-sdk":   &AgentSDKAdapter{},
+   261	    "subprocess":  &SubprocessAdapter{},
+   262	    "docker":      &DockerAdapter{},
+   263	}
+   264	
+   265	func GetAdapter(name string) (RuntimeAdapter, error) {
+   266	    adapter, ok := adapterRegistry[name]
+   267	    if !ok {
+   268	        return nil, fmt.Errorf("unknown runtime adapter: %q", name)
+   269	    }
+   270	    return adapter, nil
+   271	}
+   272	
+   273	func RegisterAdapter(name string, adapter RuntimeAdapter) {
+   274	    adapterRegistry[name] = adapter
+   275	}
+   276	```
+   277	
+   278	---
+   279	
+
+thinking
+**Gathering context for event bus**
+
+It looks like I’m focusing on using line numbers in the diff. I should gather context for the event bus section, possibly starting around line 760. I plan to collect lines in the range of 760 to 860 to ensure I have enough relevant information. This should give us a clearer understanding of the context we’re working with! I'll keep this organized and make sure I pay attention to important details.
+exec
+/bin/zsh -lc "cd /Users/csells/Code/Forks/steveyegge/gastown/gas-city-sdk-spec-forge && nl -ba PLAN.md | sed -n '740,920p'" in /Users/csells/Code/Forks/steveyegge/gastown/gas-city-sdk-spec-forge succeeded in 52ms:
+   740	        var wg sync.WaitGroup
+   741	        for _, handle in group.handles:
+   742	            wg.Add(1)
+   743	            go func(h AgentHandle) {
+   744	                runtime.Stop(h, graceful=true)
+   745	                wg.Done()
+   746	            }(handle)
+   747	        wg.Wait()
+   748	
+   749	    return nil
+   750	}
+   751	```
+   752	
+   753	**Edge cases:**
+   754	- Agent doesn't stop within timeout: Escalate to `Stop(handle, graceful=false)`.
+   755	- Supervisor restarts an agent during shutdown: Shutdown sets a `shuttingDown` flag that the supervisor checks before restarting.
+   756	- Orphaned processes: `gc stop --force` kills all processes matching the workspace's process group.
+   757	
+   758	---
+   759	
+
+thinking
+**Gathering context for algorithms**
+
+I need to provide context for the task loop algorithm, possibly looking around section 4.1 and see if I can patch things up there. It seems like I also need to gather context regarding contract tests, especially around section 15.2, particularly lines 1348. I won't rush, but it's a bit scattered right now, and I want to ensure I have all the necessary information before moving forward with any fixes or updates.
+exec
+/bin/zsh -lc "cd /Users/csells/Code/Forks/steveyegge/gastown/gas-city-sdk-spec-forge && nl -ba PLAN.md | sed -n '1320,1475p'" in /Users/csells/Code/Forks/steveyegge/gastown/gas-city-sdk-spec-forge succeeded in 52ms:
+  1320	|----------|-------------|-------------|
+  1321	| `{{.Agent}}` | All agent events | Agent name |
+  1322	| `{{.Project}}` | Project-scoped events | Project name |
+  1323	| `{{.Task}}` | Task events | Task ID |
+  1324	| `{{.TaskTitle}}` | Task events | Task title |
+  1325	| `{{.Error}}` | Failure events | Error message |
+  1326	| `{{.Timestamp}}` | All events | ISO-8601 timestamp |
+  1327	| `{{.Status}}` | State change events | New status |
+  1328	
+  1329	---
+  1330	
+  1331	## 15. Testing Strategy
+  1332	
+  1333	### 15.1 Unit Tests
+  1334	
+  1335	| Subsystem | What It Tests | Mock Boundary |
+  1336	|-----------|-------------|---------------|
+  1337	| Config parser | TOML parsing, level detection, validation rules | Filesystem (embed test TOML) |
+  1338	| Adapter registry | Registration, lookup, unknown adapter error | None (pure logic) |
+  1339	| Pool manager | Scale up/down, min/max bounds, idle timeout | RuntimeAdapter mock |
+
+
+
+
+
+
+
+thinking
+**Reviewing architecture modifications**
+
+It's time to craft a review and suggest some modifications. I'll focus on the overarching architecture. The plan describes the Gas City SDK as an orchestration-builder SDK with configuration, but a few aspects are under-specified. Specifically, I notice the lack of mention about the orchestrator engine, persistent state, and how the CLI interacts. A major improvement could be introducing a "workspace daemon" with an API to enhance reliability and performance, while adding complexity. However, I think it could simplify CLI usage by running a daemon instead.
+thinking
+**Proposing interface improvements**
+
+I'm considering the separation of concerns for the adapter interface. Instead of direct methods like `Assign(TaskDescriptor)`, it should use a more generic "Send" message, making tasks more orchestrator-level. While task assignment is key, representing it as "Run" with `WorkItem` may be more effective, expecting acknowledgment or completion events. A better design might define `RuntimeAdapter` for starting agent sessions through a `Session` object, maintaining the existing interface but shifting to a capability-based approach. It raises questions about implementing JSON-RPC in Phase 8, as that could be too late for adoption.
+thinking
+**Improving output performance**
+
+For better performance, I think using tmux's `capture-pane` for output could be heavy. Instead, I’ll suggest using `pipe-pane` to stream output directly to a file and then tail it. It would also be wise to avoid constant scanning and focus on an event-driven approach. For health monitoring, a dedicated "agent heartbeat" mechanism is crucial, with timestamps written to a file. Since obtaining internal state for LLM CLIs is challenging, we could define minimal states: Running/Stopped and timestamps for input/output, shifting state detection to the orchestrator.
+thinking
+**Refining task assignment and health checks**
+
+I realized that if the orchestrator tracks task assignments via leasing, the "state" can be derived without the runtime needing to know. I suggest removing `GetState` from the runtime adapter and introducing a generic `Inspect` method for metrics and last activity. A `Ping` method could be optional; not all runtimes can implement it, but we can approximate it with `IsRunning`. For CLIs, a non-intrusive "liveness check" might involve checking OS process existence or tmux sessions instead of intrusive pings. I propose a health check method that returns details on responsiveness and output without interfering with conversations.
+thinking
+**Enhancing logging and task protocols**
+
+I realize that we need to improve logging, so adapters should provide a log stream—perhaps using `pipe-pane` for tmux. Implementing `OpenLog` or `Logs` functions would help. I'll suggest unifying output capture with `io.Reader` for an incremental stream. Regarding task management, if tasks are tracked by leasing, we should establish clear completion signals. The Gas City project might benefit from a structured "Agent Task Protocol" that specifies how tasks are acknowledged. This could include JSON files for progress and results, which is crucial for multi-runtime reliability.
+thinking
+**Proposing structural enhancements**
+
+I want to refactor the `RuntimeAdapter` into smaller, capability-based interfaces like `Runtime`, `Session`, and more. This simplifies the architecture and removes unnecessary components. I aim to establish a standardized `Agent Task Protocol` to improve task completion detection by using explicit result files or API calls instead of relying on output scraping. Adding statuses and lease management to the TaskBackend will enhance concurrency and reliability. We also need to ensure event durability and improve performance by restructuring the event bus. Addressing tmux performance and defining worktree isolation lifecycle will round out these enhancements.
+thinking
+**Introducing a controller daemon**
+
+Without a long-lived orchestrator, there are several challenges, like maintaining pool scaling and enforcing leases. A viable solution is to introduce a `gc daemon` that runs either in the background or foreground. CLI commands will act as clients, communicating through a Unix socket. This daemon will manage orchestrator state, agent sessions, and ensure a single instance per workspace using a lock file. I also plan to use a persistent state store for metadata, enabling better performance and reliability, especially after crashes. I'll need to adjust the CLI commands and update relevant sections for this new structure.
+exec
+/bin/zsh -lc "cd /Users/csells/Code/Forks/steveyegge/gastown/gas-city-sdk-spec-forge && nl -ba PLAN.md | sed -n '1060,1160p'" in /Users/csells/Code/Forks/steveyegge/gastown/gas-city-sdk-spec-forge succeeded in 52ms:
+  1060	    var wg sync.WaitGroup
+  1061	    for i, aspect in aspects:
+  1062	        agent = agents[i % len(agents)]
+  1063	        wg.Add(1)
+  1064	        go func(a Aspect, h AgentHandle) {
+  1065	            runtime.Assign(h, aspectToTask(a))
+  1066	            waitForCompletion(h)
+  1067	            wg.Done()
+  1068	        }(aspect, agent)
+  1069	    wg.Wait()
+  1070	}
+  1071	```
+  1072	
+  1073	---
+  1074	
+  1075	## 11. CLI Design
+  1076	
+  1077	### 11.1 Command Structure
+  1078	
+  1079	The Gas City CLI is `gc`. It extends or replaces `gt` depending on configuration mode.
+
+thinking
+**Modifying section details**
+
+I’m planning to patch some things and consider modifying Section 5 to include information about the daemon. I want to check the line numbers near 5, so I’ll open up the lines around 660 to 760 where the startup algorithm is defined. It looks like I can add subsections like `5.0 Controller Process` or "Workspace Controller." I’ll add `### 5.0 Workspace Controller` before 5.1, focusing on lines 670 to 740 for context.
+exec
+/bin/zsh -lc "cd /Users/csells/Code/Forks/steveyegge/gastown/gas-city-sdk-spec-forge && nl -ba PLAN.md | sed -n '660,760p'" in /Users/csells/Code/Forks/steveyegge/gastown/gas-city-sdk-spec-forge succeeded in 51ms:
+   660	clear_context = true
+   661	```
+   662	
+   663	**Gas Town role mapping:**
+   664	
+   665	| Gas Town Role | SDK Role | Scope | Behavior |
+   666	|--------------|----------|-------|----------|
+   667	| Mayor | coordinator | workspace | Dispatches tasks, breaks down epics |
+   668	| Deacon | supervisor | workspace | Health monitoring, agent restarts |
+   669	| Dog | service | workspace (pooled) | Background infrastructure tasks |
+   670	| Witness | observer | project | Monitors project state, tracks worker progress |
+   671	| Refinery | integrator | project | Merge queue processing, verification gates |
+   672	| Polecat | worker | project (pooled, ephemeral) | Executes individual tasks |
+   673	| Crew | agent | project (persistent) | Long-lived workspace agents |
+   674	
+   675	---
+   676	
+   677	## 5. Startup and Shutdown
+   678	
+   679	### 5.1 Startup Sequencer
+
+
+
+
+
+Reconnecting... 1/5 (stream disconnected before completion: Transport error: network error: error decoding response body)
+Reconnecting... 2/5 (stream disconnected before completion: error sending request for url (https://chatgpt.com/backend-api/codex/responses))
+Reconnecting... 3/5 (stream disconnected before completion: error sending request for url (https://chatgpt.com/backend-api/codex/responses))
+Reconnecting... 4/5 (stream disconnected before completion: error sending request for url (https://chatgpt.com/backend-api/codex/responses))
+Reconnecting... 5/5 (stream disconnected before completion: error sending request for url (https://chatgpt.com/backend-api/codex/responses))
+ERROR: stream disconnected before completion: error sending request for url (https://chatgpt.com/backend-api/codex/responses)
+tokens used
+48,656
