@@ -9,11 +9,11 @@
 
 ## 1. Executive Summary
 
-Gas City is an **orchestration-builder SDK** — a Go toolkit for composing multi-agent coding workflows. It extracts Gas Town's battle-tested subsystems (agents, beads, mail, nudge, formulas, molecules, convoys, plugins, health monitoring) into a configurable SDK where **all role behavior is user-supplied configuration** and the SDK provides only infrastructure.
+Gas City is an **orchestration-builder SDK** — a Go toolkit for composing multi-agent coding workflows. It is the "Level 8" — the next step beyond Gas Town for users who have outgrown any single orchestrator and want to build their own. It extracts Gas Town's battle-tested subsystems (agents, beads, mail, nudge, formulas, molecules, convoys, plugins, health monitoring) into a configurable SDK where **all role behavior is user-supplied configuration** and the SDK provides only infrastructure. You can build Gas Town in Gas City, or Ralph, or Claude Code Agent Teams, or any other orchestration topology you design — via specific configurations.
 
-**The core principle: ZERO hardcoded roles.** Gas City has no built-in Mayor, Deacon, Polecat, or any other role. The SDK provides the machinery — agent protocol, task system, messaging, formula engine, molecule execution, health monitoring, session management — and the user provides TOML config files and Markdown prompt templates that define what agents exist, what they do, and how they coordinate.
+**The core principle: ZERO hardcoded roles.** Gas City has no built-in Mayor, Deacon, Polecat, or any other role. The SDK provides the machinery — agent protocol, task system, messaging, formula engine, molecule execution, health monitoring, session management — and the user provides TOML config files and Markdown prompt templates that define what agents exist, what they do, and how they coordinate. Users can create their own roles, teams, coordination rules, and worker instructions — a full configurability surface.
 
-**Progressive capability model:** Users start with a minimal TOML config (~10 lines for a single agent) and add sections as needed. The SDK activates subsystems based on what's configured. Config grows; the SDK is constant.
+**Progressive capability model:** Users start with a minimal TOML config (~10 lines for a single agent) and add sections as needed. The SDK activates subsystems based on what's configured. Config grows; the SDK is constant. Every level is independently useful.
 
 **Three example configs ship with the SDK:**
 - `ralph.toml` — Single agent with task loop
@@ -55,7 +55,9 @@ These are examples, not defaults. `gc init --file ralph.toml` copies an example 
 
 ### 2.1 Design Rationale
 
-Every interaction with an agent — starting, stopping, sending prompts, reading output, health-checking — flows through a uniform protocol. This decouples the orchestration logic from any specific agent runtime.
+Every AI coding agent — regardless of implementation — is accessed through a uniform "factory worker" abstraction. This decouples the orchestration logic from any specific coding agent (Claude Code, Codex, Gemini, OpenCode, etc.) or execution substrate (tmux, Docker, Agent SDK, custom code). The rest of the SDK builds exclusively on this abstraction.
+
+v1 ships providers for tmux-based agents and generic subprocess. Docker and Agent SDK substrates are future providers — the interface accommodates them without changes.
 
 The critical operation is `SendPrompt`: delivering a prompt (text + optional images + optional file attachments) to a running agent. This is how Gas Town assigns work — nudging an agent with a prompt that includes context.
 
@@ -116,7 +118,7 @@ type Adopter interface {
 ```go
 type AgentIdentity struct {
     Workspace string  // Workspace name
-    Project   string  // Project/rig name (empty for workspace-scoped)
+    Project   string  // Project name (empty for workspace-scoped)
     Name      string  // Agent name from config
     Instance  int     // Pool instance index (0 for non-pooled)
 }
@@ -245,8 +247,8 @@ start_command = ""              # Override command (default from provider)
 needs_pre_sync = false          # Git pull before session start
 
 [agents.env]                    # Extra environment variables
-GT_ROLE = "{role}"
-GT_SCOPE = "{scope}"
+GC_ROLE = "{role}"
+GC_SCOPE = "{scope}"
 
 [agents.pool]                   # Pool sizing for ephemeral agents
 min = 0
@@ -565,8 +567,8 @@ The SDK provides ONLY template rendering and config loading. All role behavior l
 ```toml
 # roles/polecat.toml
 role = "polecat"
-scope = "rig"
-nudge = "You have work on your hook. Check gt mol status."
+scope = "project"
+nudge = "You have work on your hook. Check gc mol status."
 prompt_template = "polecat.md.tmpl"
 
 [session]
@@ -576,8 +578,8 @@ needs_pre_sync = true
 start_command = "exec claude --dangerously-skip-permissions"
 
 [env]
-GT_ROLE = "polecat"
-GT_SCOPE = "rig"
+GC_ROLE = "polecat"
+GC_SCOPE = "project"
 
 [health]
 ping_timeout = "30s"
@@ -638,10 +640,10 @@ These roles ship as example files with the SDK, not as hardcoded behavior:
 
 | Role | Scope | Behavior (defined in prompt template) |
 |------|-------|---------------------------------------|
-| mayor | workspace | Global coordinator. Dispatches tasks, breaks down epics, manages rigs. |
+| mayor | workspace | Global coordinator. Dispatches tasks, breaks down epics, manages projects. |
 | deacon | workspace | Daemon beacon. Receives heartbeats, watches witnesses, manages dogs. |
-| dog | workspace | Town-level infrastructure worker. Cross-rig tasks, cleanup, maintenance. |
-| witness | project | Per-rig monitor. Tracks worker progress, detects stalls, reports to deacon. |
+| dog | workspace | Workspace-level infrastructure worker. Cross-project tasks, cleanup, maintenance. |
+| witness | project | Per-project monitor. Tracks worker progress, detects stalls, reports to deacon. |
 | refinery | project | Merge queue processor. Verification gates, conflict resolution. |
 | polecat | project | Ephemeral batch worker. Executes individual tasks, self-cleans on completion. |
 | crew | project | Persistent workspace agent. Long-lived, direct push to main. |
@@ -802,7 +804,9 @@ Gas Town uses beads (Dolt-backed structured data) as its primary task system. Ga
 
 ### 10.2 Bead Types
 
-From Gas Town's actual bead taxonomy:
+Bead types are **not hardcoded into the SDK**. They are part of the workspace's configuration — users can define whatever types make sense for their orchestration. The SDK treats the type field as an opaque string; specific semantics (like the hook slot on agent beads, or step children on molecule beads) are implemented as behaviors keyed on type, not as a fixed enum.
+
+Gas Town's bead taxonomy (shipped as examples):
 
 | Type | Purpose |
 |------|---------|
@@ -814,6 +818,8 @@ From Gas Town's actual bead taxonomy:
 | `convoy` | Batch tracking bead |
 | `mail` | Mail message |
 | `merge-request` | Merge queue entry |
+
+Users can define additional types as needed. The SDK's subsystems (formulas, convoys, mail) create beads of the appropriate type but don't restrict what types can exist.
 
 ### 10.3 Bead Status Lifecycle
 
@@ -1071,7 +1077,7 @@ A convoy is a persistent tracking bead that groups related issues across project
 ### 13.2 Key Concepts
 
 - A convoy is a bead of type `convoy` at the town level
-- Tracks multiple issues across rigs via non-blocking "tracks" dependency
+- Tracks multiple issues across projects via non-blocking "tracks" dependency
 - Convoy status is derived from its tracked issues
 - Auto-closes when all tracked issues close
 - Can detect "stranded" convoys (ready work, no active workers)
@@ -1309,6 +1315,10 @@ gc convoy stranded
 gc mail inbox
 gc mail read <id>
 gc mail send <addr> -s "Subject" -m "Body"
+gc mail send --human                                  # Send to human overseer
+gc mail mark-read <id>
+gc mail hook <mail-id>                                # Hook mail as assignment
+gc mail archive                                       # Archive old mail
 gc nudge <target> [message]
 gc broadcast <message>
 
@@ -1330,6 +1340,7 @@ gc prime                                              # Render role prompt for c
 gc migrate [--dry-run]                                # Generate config from Gas Town workspace
 gc doctor                                             # Health checks
 gc config show                                        # Display resolved config
+gc test-provider <name>                               # Run conformance suite against a provider
 gc version
 ```
 
@@ -1509,8 +1520,9 @@ Hooks run as shell commands via `sh -c` with a default 30s timeout. They are exe
 - AgentProvider interface with `SendPrompt`
 - Provider implementations: `claude` (tmux), `subprocess` (generic)
 - TOML config parser with level detection and validation
+- Identity and addressing (agent registry, address resolution)
 - `gc init --file`, `gc start`, `gc stop`, `gc status`, `gc level`, `gc validate`
-- Contract test suite
+- Contract test suite (`gc test-provider`)
 
 ### Phase 2: Task System + Ralph (2 weeks)
 
@@ -1527,6 +1539,7 @@ Hooks run as shell commands via `sh -c` with a default 30s timeout. They are exe
 - Startup/shutdown sequencer with DAG ordering
 - Mail system (beads-backed, priority levels)
 - Nudge system (tmux send-keys)
+- Lifecycle hooks (event-driven shell commands)
 - `gc mail`, `gc nudge`, `gc broadcast`
 - ccat.toml (Agent Teams) working end-to-end
 
