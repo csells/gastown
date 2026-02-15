@@ -15,6 +15,10 @@ From https://steve-yegge.medium.com/steveys-birthday-blog-34f437139cb5:
 - GC provides a progressive capability model where each level adds a capability.
   The config file grows accordingly. Every level is independently useful.
 
+- GC configuration provides reasonable defaults so that the user only has to
+  configure subsystems that they would like to bring online, thus providing for
+  a progressive capabilities as needed.
+
 - To populate GC, you can create your own roles, teams, coordination rules, and
   worker instructions (a full configurability surface)
 
@@ -24,8 +28,16 @@ From https://steve-yegge.medium.com/steveys-birthday-blog-34f437139cb5:
 - GC supports wiring in sandboxes, plugins, and hooks (explicit extensibility +
   integration points)
 
-- Every agent — regardless of implementation — is accessed through a uniform
-  "factory worker" abstraction. This decouples the orchestration logic from any
-  specific coding agent (Claude Code, Codex, Gemini, OpenCode, etc) or execution
-  substrate (tmux, Docker, Agent SDK, custom code). The rest of the SDK builds
-  exclusively on this abstraction.
+- Every AI coding agent — regardless of implementation — is accessed through a
+  uniform "factory worker" abstraction. This decouples the orchestration logic
+  from any specific coding agent (Claude Code, Codex, Gemini, OpenCode, etc) or
+  execution substrate (tmux, Docker, Agent SDK, custom code). The rest of the
+  SDK builds exclusively on this abstraction.
+
+- GC provides the same set of capabilities and subsystems as GT, but
+  configurable instead of hardcoded, e.g. the mayor is part of a "gastown.toml"
+  file instead of hardcoded into the code.
+
+- GC is completely transparent and can be traced via the deamon that provides a
+  websocket that shows the historical data and streaming changes to data, e.g.
+  agent request/response pairs, mail, beads, agent active status, etc.
