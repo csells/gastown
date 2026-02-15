@@ -45,5 +45,5 @@ From https://steve-yegge.medium.com/steveys-birthday-blog-34f437139cb5:
 - Every AI coding agent — regardless of implementation — is accessed through a
   uniform "factory worker" abstraction. This decouples the orchestration logic
   from any specific coding agent (Claude Code, Codex, Gemini, OpenCode, etc) or
-  execution substrate (tmux, Docker, Agent SDK, custom code). The rest of the
+  execution substrate (tmux, Agent SDK, custom code). The rest of the
   SDK builds exclusively on this abstraction.
