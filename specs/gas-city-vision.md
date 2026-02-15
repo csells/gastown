@@ -33,6 +33,11 @@ From https://steve-yegge.medium.com/steveys-birthday-blog-34f437139cb5:
   configurable instead of hardcoded, e.g. the mayor is part of a "gastown.toml"
   file instead of hardcoded into the code.
 
+- GC builds up higher level concepts on lower level concepts, e.g the mail
+  system is built on top of the beads system. The core principles are clearly
+  visible and intrinsic whereas the higher level concepts are built up with
+  configuration.
+
 - GC is completely transparent and can be traced via the deamon that provides a
   websocket that shows the historical data and streaming changes to data, e.g.
   agent request/response pairs, mail, beads, agent active status, etc.
