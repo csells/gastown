@@ -12,6 +12,9 @@ From https://steve-yegge.medium.com/steveys-birthday-blog-34f437139cb5:
   Gas Town in Gas City or any other kind of orchestrator you want, e.g. Ralph,
   Claude Code Agent Teams, via specific configurations of Gas City.
 
+- GC provides a progressive capability model where each level adds a capability.
+  The config file grows accordingly. Every level is independently useful.
+
 - To populate GC, you can create your own roles, teams, coordination rules, and
   worker instructions (a full configurability surface)
 
@@ -20,9 +23,6 @@ From https://steve-yegge.medium.com/steveys-birthday-blog-34f437139cb5:
 
 - GC supports wiring in sandboxes, plugins, and hooks (explicit extensibility +
   integration points)
-
-- GC provides a progressive capability model where each level adds a capability.
-  The config file grows accordingly. Every level is independently useful.
 
 - Every agent — regardless of implementation — is accessed through a uniform
   "factory worker" abstraction. This decouples the orchestration logic from any
