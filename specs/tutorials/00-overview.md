@@ -32,9 +32,9 @@ right? Then keep on reading with the next tutorial. By the time you get to the
 end, you'll have the entire Gas Town stack built - and you'll understand every
 line because you added them all yourself.
 
-Note: You get configurations for "hello, world", "Ralph loop", "Agent Teams" and
-"Gas Town" out of the box with Gas City, so you don't have to rebuild them; you
-can just use them.
+Note: You get configurations for "hello world", "named crew", "Ralph loop",
+"Agent Teams" and "Gas Town" out of the box with Gas City, so you don't have to
+rebuild them; you can just use them.
 
 ---
 
@@ -43,15 +43,16 @@ can just use them.
 Each tutorial solves a real problem that plain coding agents can't handle on
 their own. The config grows; it never resets.
 
-| Tutorial                                              | Problem                                                                                        | What You Add                                   |
-| ----------------------------------------------------- | ---------------------------------------------------------------------------------------------- | ---------------------------------------------- |
-| [01 — Hello, Gas City](01-hello-gas-city.md)          | "My agent ran out of context and forgot everything."                                           | Agent + Task Store + Config                    |
-| [02 — Looping with Ralph](02-looping-with-ralph.md)   | "Implement each task with a clean context; don't stop until you've met my definition of done." | `[agents.loop]`                                |
-| [03 — Agent Team](03-agent-team.md)                   | "One agent is too slow!"                                                                       | Multiple agents + roles + messaging + dispatch |
-| [04a — Formulas](04a-formulas.md)                     | "I want to provide a specific workflow for my agent team."                                     | Formulas + molecules                           |
-| [04b — Health Patrol](04b-health-patrol.md)           | "Keep your agents going without babysitting them."                                             | Daemon + health monitoring                     |
-| [04c — Plugins](04c-plugins.md)                       | "I want automated maintenance, not manual chores."                                             | Plugin system + gate conditions                |
-| [04d — Full Orchestration](04d-full-orchestration.md) | "I want the full Gas Town!"                                                                    | Multi-project + all roles                      |
+| Tutorial                                              | Problem                                                                                        | What You Add                                    |
+| ----------------------------------------------------- | ---------------------------------------------------------------------------------------------- | ----------------------------------------------- |
+| [01 — Hello, Gas City](01-hello-gas-city.md)          | "My agent ran out of context and forgot everything."                                           | Mayor + coding agent + beads                    |
+| [02 — Named Crew](02-named-crew.md)                   | "I'm routing work to agents manually. The mayor should do that."                               | Named agents on rigs + mayor routing            |
+| [03 — The Ralph Loop](03-ralph-loop.md)               | "I have a backlog. I don't want to hand-feed tasks."                                           | Agent loop + hook-based draining                |
+| [04 — Agent Team](04-agent-team.md)                   | "One agent is too slow!"                                                                       | Multiple agents + roles + messaging + dispatch  |
+| [05a — Formulas](05a-formulas.md)                     | "I want to provide a specific workflow for my agent team."                                     | Formulas + molecules                            |
+| [05b — Health Patrol](05b-health-patrol.md)            | "Keep your agents going without babysitting them."                                             | Daemon + health monitoring                      |
+| [05c — Plugins](05c-plugins.md)                       | "I want automated maintenance, not manual chores."                                             | Plugin system + gate conditions                 |
+| [05d — Full Orchestration](05d-full-orchestration.md) | "I want the full Gas Town!"                                                                    | Multi-project + all roles                       |
 
 Tutorial 01 gives you a working system. Everything after that makes it
 more capable.
@@ -73,9 +74,8 @@ No prior Gas Town experience required. These tutorials start from zero.
 **Shell commands** are prefixed with `$`:
 
 ```
-$ gc start
-Starting agent 'worker'...
-Agent 'worker' is running.
+$ gc start ~/bright-lights
+Welcome to Gas City!
 ```
 
 **TOML config** is shown as file contents with the filename above:
@@ -143,34 +143,38 @@ Early tutorials use few sections; later ones use more.
 Tutorial 01 — Hello, Gas City
   Primitives:  Agent Protocol, Task Store, Config
   Mechanisms:  (none)
-  You get:     One agent, tracked work, context survival
+  You get:     Mayor + coding agent, tracked work, beads on disk
 
-Tutorial 02 — Looping with Ralph
-  Adds:        [agents.loop] config
-  You get:     Continuous task processing from a backlog
+Tutorial 02 — Named Crew
+  Adds:        Named agents on rigs, mayor routing to hooks
+  You get:     Mayor assigns beads to specific crew members
 
-Tutorial 03 — Agent Team
+Tutorial 03 — The Ralph Loop
+  Adds:        Agent loop config
+  You get:     Crew members drain their hook automatically, clean context each bead
+
+Tutorial 04 — Agent Team
   Adds:        Event Bus, Prompt Templates, Messaging, Dispatch
-  You get:     Coordinator + workers, typed roles, work distribution
+  You get:     Multiple roles, typed communication, work distribution
 
-Tutorial 04a — Formulas
+Tutorial 05a — Formulas
   Adds:        Formulas & Molecules
   You get:     Reusable multi-step workflows
 
-Tutorial 04b — Health Patrol
+Tutorial 05b — Health Patrol
   Adds:        Daemon, Health Patrol
   You get:     Self-healing, stall detection, automatic recovery
 
-Tutorial 04c — Plugins
+Tutorial 05c — Plugins
   Adds:        Plugin system with gate conditions
   You get:     Automated maintenance tasks on schedule/event triggers
 
-Tutorial 04d — Full Orchestration
+Tutorial 05d — Full Orchestration
   Adds:        Multi-project config, all 8 roles
   You get:     The complete Gas Town — rebuilt from config
 ```
 
-By tutorial 04d, your config file defines the full Gas Town orchestration
+By Tutorial 05d, your config file defines the full Gas Town orchestration
 system. Every line in it exists because you added it to solve a specific
 problem.
 

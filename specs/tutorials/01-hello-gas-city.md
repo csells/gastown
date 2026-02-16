@@ -13,8 +13,9 @@ out of context is no longer catastrophic. In fact, it can be beneficial to clear
 out the context before it rots. A fresh session queries beads and picks up right
 where the last one left off. The state is in the store, not in the agent's head.
 
-This tutorial builds the simplest possible Gas City workspace: one agent, one
-task, and the beads system that makes context survival work.
+This tutorial builds the simplest possible Gas City orchestration: a named agent
+(the "Mayor") to capture the work, an anonymouse coding agent to build it and
+the beads system that ties it all together.
 
 ---
 
@@ -45,9 +46,9 @@ To configure your new city, add a `settings.yaml` file.
 
 To get started with one of the built-in configurations, use `gc init`.
 
-To add a rig (project), [TODO]
+To add a rig (project), use `gc rig add <path>`.
 
-[TODO: the rest]
+For help, use `gc help`.
 ```
 
 Starting a city uses the configuration to ensure that you have the agents you
@@ -64,7 +65,11 @@ To associate a project (called a "rig") with a city, you add it:
 $ cd ~/bright-lights
 
 $ gc rig add ~/projects/tower-of-hanoi
-[TODO: "adding rig..."]
+Adding rig 'tower-of-hanoi'...
+  Detected git repo at ~/projects/tower-of-hanoi
+  Configured AGENTS.md with beads integration
+  Assigned default agent: mayor
+Rig added.
 
 $ gc rig list
 
@@ -79,7 +84,7 @@ way to specify that is to be in the configuration folder of the city itself, but
 you can also specify the city manually via the `--city` argment.
 
 Because we're getting the default GC configuration, we have only a single agent
--- the mayor -- who is wwho you'll talk to do the planning and work.
+-- the mayor -- who is who you'll talk to for planning and coordination.
 
 ## Create a Task
 
@@ -94,13 +99,13 @@ Created bead: gc-1  (status: open)
 
 # list the open beads (use this less)
 $ gc bead list
-
-[TODO: show command output]
+ID    STATUS   ASSIGNEE   TITLE
+gc-1  open     —          Build a Tower of Hanoi app
 
 # list the beads ready to work on (use this more)
 $ gc bead ready
-
-[TODO: show command output]
+ID    STATUS   TITLE
+gc-1  open     Build a Tower of Hanoi app
 ```
 
 However, I recommend you talk to the mayor about the work you'd like to do
@@ -124,7 +129,7 @@ Mayor: Sure! I'll create that bead for you.
   $ gc bead create "Build a Tower of Hanoi app"
   Created bead: gc-1  (status: open)
 
-Done — gc-1 is ready to go. Want me to start working on it?
+Done — gc-1 is in the backlog and ready for a crew member to pick up.
 
 You: Can you list the ready beads?
 
@@ -134,14 +139,15 @@ Mayor: Of course.
   ID    STATUS   TITLE
   gc-1  open     Build a Tower of Hanoi app
 
-Just the one bead in the backlog right now. Would you like me to get to work on
-it?
-
-You: [switch to another shell instance]
+Just the one bead in the backlog right now.
 ```
 
-The act of "attaching" to the mayor via `gt agent attach` brings up the single
-instance of that agent running in a tmux session.
+The act of "attaching" to the mayor via `gc agent attach` brings up the single
+instance of that agent running in a tmux session. The mayor's session is
+long-lived — it persists even if you close your terminal. You can detach from
+it any time with `Ctrl-b d` and reattach later with `gc agent attach mayor`.
+This is how Gas City keeps agents running in the background while you do other
+things.
 
 A new bead starts with a status of `open` — available for claiming. No assignee
 yet.
@@ -167,9 +173,10 @@ Assignee: —
 
 ## Let's get to work!
 
-Now let's use a CLI coding agent to pick up that work for our rig. Leave the
-mayor for other work and start a new shell instance. Now `cd` to your project
-directory so we can put an agent to work there.
+Now let's use a CLI coding agent to pick up that work for our rig. Detach from
+the mayor's session (`Ctrl-b d`) and start a coding agent in the project
+directory. We recommend running it in its own tmux session so you can detach
+and let it work:
 
 Because you've added the rig to the "bright-lights" city, any agent that
 supports the AGENTS.md (most of them) or CLAUDE.md (Claude Code) rules files has
@@ -177,37 +184,46 @@ already been configured with the information it needs to understand tasks
 expressed as beads:
 
 ```shell
+$ tmux new -s tower-worker
 $ cd ~/projects/tower-of-hanoi
-$ codex # or claude or gemini or ...
+$ codex   # or claude, gemini, etc.
 
-[TODO: agent output]
+Codex (research preview)
+model: o3
 
-You: can you check what beads are ready?
+You: Can you check what beads are ready?
 
-[TODO: agent output asking if you want to do this work]
+Codex: Checking...
 
-You: yes, please!
+  $ gc bead ready
+  ID    STATUS   TITLE
+  gc-1  open     Build a Tower of Hanoi app
 
-[TODO: agent output]
+There's one bead ready — gc-1, "Build a Tower of Hanoi app." Want me to
+pick it up?
+
+You: Yes, please!
+
+Codex: On it. Let me start by setting up the project structure...
 ```
 
-You can watch it build your app right in the tmux session, or detach from the
-tmux sessions (`Ctrl-b d`) and let it cook.
+You can watch it build your app, or detach from the tmux session (`Ctrl-b d`)
+and let it cook.
 
 Check the bead status from another terminal any time you like:
 
 ```shell
 $ gc bead list
-ID    STATUS   ASSIGNEE   TITLE
-gc-1  active   mayor      Build a Tower of Hanoi app
+ID    STATUS   ASSIGNEE                TITLE
+gc-1  active   tower-of-hanoi-codex    Build a Tower of Hanoi app
 ```
 
 When the agent finishes, it closes the bead:
 
 ```shell
 $ gc bead list
-ID    STATUS   ASSIGNEE   TITLE
-gc-1  closed   mayor      Build a Tower of Hanoi app
+ID    STATUS   ASSIGNEE                TITLE
+gc-1  closed   tower-of-hanoi-codex    Build a Tower of Hanoi app
 ```
 
 That's it. The coding agent has now built your app. The bead records that the
@@ -234,11 +250,63 @@ play different roles. That's [Tutorial 03](03-agent-team.md).
 ## What's Next
 
 At this point, you've got yourself a working orchestration system. You can use
-the mayor to create beads and pull in your beads from your working agents on
-demand.
+the mayor to create beads and hand them off to a coding agent on demand.
 
-In Tutorial 02, we'll see how to manage multiple rigs and route work from the
-mayor to multiple rigs via named "crew" (agents assigned to your rigs).
+But right now you're doing the routing manually — you told codex to check beads
+yourself. And the agent's name was auto-generated. What if the mayor could
+assign beads directly to a named crew member? And what if that crew member
+could loop — clearing its context and picking up the next bead automatically?
 
-[TODO: push the Ralph loop ahead one step to make room for the multi-project
-tutorial]
+In [Tutorial 02 — Named Crew](02-named-crew.md), you'll register named agents
+on your rigs so the mayor can route work to them. That sets the stage for
+[Tutorial 03 — The Ralph Loop](03-ralph-loop.md), where your crew members
+drain a backlog on their own.
+
+---
+
+## Spec Changes Needed
+
+> This section tracks DX decisions from the tutorial that need to flow back
+> into `gas-city-spec.md`. Don't delete until the spec is updated.
+
+- **City-as-directory model.** A city is a folder (`~/bright-lights`), not a
+  config file embedded in a project repo. `gc start <path>` starts a city from
+  that directory. The spec currently assumes workspace.toml inside the project.
+
+- **`gc rig add <path>`** — new command to associate a project with a city.
+  Writes AGENTS.md into the project. Not in the spec at all.
+
+- **`gc rig list`** — new command to list rigs in a city. Not in the spec.
+
+- **`gc agent attach <name>`** — starts or reattaches to a named agent's tmux
+  session. Spec has `gc agent start` but not `attach`.
+
+- **Default agent naming: `<rig-name>-<process-name>`** — when a coding agent
+  picks up a bead without an explicit agent name, the assignee defaults to
+  `<rig-name>-<cli-process-name>` (e.g. `tower-of-hanoi-codex`). Not in spec.
+
+- **Mayor as overseer, not worker.** The default config creates a mayor whose
+  role is planning and coordination, not coding. Workers are separate agents
+  started in rig directories. Spec doesn't distinguish mayor from worker role.
+
+- **`gc rig add` writes AGENTS.md.** Adding a rig configures the project so
+  any agent started there knows about beads. Spec doesn't cover this
+  integration mechanism.
+
+- **`settings.yaml` mentioned in `gc start` output.** Spec uses TOML. Need to
+  decide: YAML, TOML, or both?
+
+- **`gc bead claim` is implicit.** Agents pick up beads by working on them; the
+  `open → active` transition happens internally. No explicit `gc bead claim`
+  command needed in the basic flow.
+
+- **`--city` flag on gc commands.** When not in the city directory, commands
+  accept `--city <path>` to specify which city. Not in spec.
+
+- **Tutorial reordering.** The original plan had Tutorial 02 = Ralph loop.
+  New order: 02 = Named Crew + routing, 03 = Ralph Loop. The Ralph loop
+  requires routing as a prerequisite so that beads land on the agent's hook
+  and the loop just clears context and picks up the next hooked bead.
+
+- **"Crew" terminology.** Named agents assigned to rigs. New concept not in
+  spec. Relates to the existing agent config but adds rig-scoped naming.
