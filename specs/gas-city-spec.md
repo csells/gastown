@@ -1,9 +1,9 @@
 # Gas City SDK — Technical Specification
 
-> **Version:** 0.11.0
+> **Version:** 0.12.0
 > **Date:** 2026-02-15
 > **Status:** Planning (grounded in Gas Town source exploration)
-> **Predecessor:** v0.10.0 (multi-model review fixes: substrate table corrections, SandboxProvider handle struct, event schema/locking/security, scoped persistence invariant)
+> **Predecessor:** v0.11.0 (added hello-world.toml as fourth example config, aligned with concepts doc §6 "Four Configs, One SDK")
 
 ---
 
@@ -15,12 +15,13 @@ Gas City is an **orchestration-builder SDK** — a Go toolkit for composing mult
 
 **Progressive capability model:** Users start with a minimal TOML config (~10 lines for a single agent) and add sections as needed. The SDK activates subsystems based on what's configured. Config grows; the SDK is constant. Every level is independently useful.
 
-**Three example configs ship with the SDK:**
+**Four example configs ship with the SDK:**
+- `hello-world.toml` — Single agent, single task (simplest possible)
 - `ralph.toml` — Single agent with task loop
 - `ccat.toml` — Claude Code Agent Teams: coordinator + worker pool
 - `gastown.toml` — Complete Gas Town replication with all 8 roles, formulas, plugins, multi-project support
 
-These are examples, not defaults. `gc init --file ralph.toml` copies an example to the workspace.
+These are examples, not defaults. `gc init --file hello-world.toml` copies an example to the workspace.
 
 **What the SDK provides (Go code — infrastructure):**
 - Agent protocol implementation (start/stop/nudge/prompt agents)
@@ -693,9 +694,27 @@ Each level adds one capability. Config grows; the SDK is constant.
 
 ---
 
-## 5. Three Example Configs
+## 5. Four Example Configs
 
-### 5.1 ralph.toml — Single Agent with Task Loop (Level 2)
+### 5.1 hello-world.toml — Single Agent, Single Task (Level 1)
+
+```toml
+[workspace]
+name = "my-project"
+
+[projects.main]
+repo = "."
+
+[tasks]
+backend = "beads"
+
+[[agents]]
+name = "worker"
+```
+
+~8 lines. Provider auto-detected. Beads for task tracking. User creates beads, agent claims and executes them. No loop — agent works a single task per session. This is the simplest possible Gas City config: one agent, tracked work, context survival across sessions.
+
+### 5.2 ralph.toml — Single Agent with Task Loop (Level 2)
 
 ```toml
 [workspace]
@@ -718,7 +737,7 @@ poll_interval = "30s"
 
 ~10 lines. Provider auto-detected. Beads for task tracking. Agent polls for work and executes it.
 
-### 5.2 ccat.toml — Claude Code Agent Teams (Level 4)
+### 5.3 ccat.toml — Claude Code Agent Teams (Level 4)
 
 ```toml
 [workspace]
@@ -756,7 +775,7 @@ enabled = true
 auto_execute = true
 ```
 
-### 5.3 gastown.toml — Full Gas Town Replication (Level 8)
+### 5.4 gastown.toml — Full Gas Town Replication (Level 8)
 
 ```toml
 [workspace]
@@ -1888,7 +1907,7 @@ The Gas City CLI is `gc`.
 
 ```
 # Workspace lifecycle
-gc init [--file ralph.toml|ccat.toml|gastown.toml]  # Init from example config
+gc init [--file hello-world.toml|ralph.toml|ccat.toml|gastown.toml]  # Init from example config
 gc init                                               # Interactive wizard
 gc start [--daemon] [--config <path>]                 # Config flag (§3.1)
 gc stop [--force] [--drain-timeout 5m]
@@ -1984,20 +2003,21 @@ gc version
 ### 17.2 `gc init --file`
 
 ```
-$ gc init --file ralph.toml
-Copied ralph.toml to ./ralph.toml
+$ gc init --file hello-world.toml
+Copied hello-world.toml to ./hello-world.toml
 Run `gc start` to begin.
 
 $ gc init
 Welcome to Gas City SDK!
 
 Example configs available:
-  > ralph.toml      -- Single agent with task loop (simplest)
-    ccat.toml       -- Coordinator + worker pool (Agent Teams)
-    gastown.toml    -- Full multi-project orchestration (Gas Town)
-    (custom)        -- Start from scratch
+  > hello-world.toml -- Single agent, single task (simplest)
+    ralph.toml       -- Single agent with task loop
+    ccat.toml        -- Coordinator + worker pool (Agent Teams)
+    gastown.toml     -- Full multi-project orchestration (Gas Town)
+    (custom)         -- Start from scratch
 
-Select [ralph.toml]:
+Select [hello-world.toml]:
 
 Which coding agent do you use?
   > Claude Code
@@ -2008,7 +2028,7 @@ Which coding agent do you use?
 
 Select [Claude Code]:
 
-Created ralph.toml (Level 2 - Task Loop)
+Created hello-world.toml (Level 1 - Single Agent)
 Run `gc start` to begin.
 ```
 
@@ -2286,6 +2306,7 @@ Using these flags is required for autonomous agent operation but means the agent
 - `gc init --file`, `gc start`, `gc stop`, `gc status`, `gc level`, `gc validate`
 - `gc config show`, `gc doctor`, `gc version`
 - Contract test suite (`gc test-provider`)
+- hello-world.toml working end-to-end (single agent, single task)
 
 ### Phase 2: Task System + Ralph (2 weeks)
 
@@ -2430,7 +2451,7 @@ ready(s) ⟺ ∀di ∈ D: status(di) = closed
 | Vision Requirement | Spec Section | Status |
 |-------------------|-------------|--------|
 | Orchestration-builder toolkit | §1 Executive Summary | Covered |
-| Multiple town shapes via config | §5 Three Example Configs | ralph, ccat, gastown |
+| Multiple town shapes via config | §5 Four Example Configs | hello-world, ralph, ccat, gastown |
 | Progressive capability model | §4 Levels 0-8 | Covered (plugins now Level 7) |
 | Reasonable defaults | §3.3 Defaults table | Every setting has default |
 | Full configurability surface | §6 Role System | TOML + templates + override resolution |
