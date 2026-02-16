@@ -29,7 +29,7 @@ These tutorials build Gas City up from the core principles baked into Gas City.
 Each one adds a new capability to your config. At the end of each tutorial,
 you'll have a working orchestrator. Want to add more features to get it just
 right? Then keep on reading with the next tutorial. By the time you get to the
-end, you'll have the entire Gas Tow stack built - and you'll understand every
+end, you'll have the entire Gas Town stack built - and you'll understand every
 line because you added them all yourself.
 
 Note: You get configurations for "hello, world", "Ralph loop", "Agent Teams" and
