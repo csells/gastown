@@ -1,6 +1,14 @@
 # Gas City Vision
 
-From https://steve-yegge.medium.com/steveys-birthday-blog-34f437139cb5:
+## Initial source
+
+https://steve-yegge.medium.com/steveys-birthday-blog-34f437139cb5
+
+## Augmented by
+
+csells@sellsbrothers.com
+
+## Principles
 
 - Gas City is an orchestration-builder toolkit (not just an orchestrator).
 
@@ -45,9 +53,9 @@ From https://steve-yegge.medium.com/steveys-birthday-blog-34f437139cb5:
   websocket that shows the historical data and streaming changes to data, e.g.
   agent request/response pairs, mail, beads, agent active status, etc.
 
-- Every AI coding agent — regardless of implementation — is accessed through a
-  uniform "factory worker" abstraction. This decouples the orchestration logic
-  from any specific coding agent (Claude Code, Codex, Gemini, OpenCode, etc) or
-  execution substrate (tmux, Agent SDK, custom code). The rest of the SDK builds
-  on this abstraction and does NOT depend on any of the implementation details
-  of the underlying agents themselves.
+- Every core subsystem (agent execution, task storage, events, config,
+  templates) is accessed through an interface. The SDK ships working
+  implementations for all of them — and multiple where needed (e.g., claude,
+  codex, gemini agent providers). Higher-level behavior (messaging, formulas,
+  dispatch, health patrol) is defined against the interfaces, so adding a new
+  agent provider or task backend doesn't touch the layers above.
