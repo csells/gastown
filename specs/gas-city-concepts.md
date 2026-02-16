@@ -14,9 +14,11 @@
 3. [The Four Derived Mechanisms](#3-the-four-derived-mechanisms)
 4. [The Core Data Flows](#4-the-core-data-flows)
 5. [Implementation Pluggability](#5-implementation-pluggability)
-6. [Three Configs, One SDK](#6-three-configs-one-sdk)
+6. [Four Configs, One SDK](#6-four-configs-one-sdk)
 7. [What Got Cut (and Why It's OK)](#7-what-got-cut-and-why-its-ok)
 8. [Vision Requirements Cross-Reference](#8-vision-requirements-cross-reference)
+
+*Note: §-references (e.g., §2.2, §10) point to sections in `gas-city-spec.md`, not this document.*
 
 ---
 
@@ -34,12 +36,32 @@ a primitive.
 These tests produce a sharp boundary:
 
 - **Core primitives** are SDK infrastructure. They exist as Go interfaces and
-  engines. Removing any one breaks all three example configs.
+  engines. Removing any one breaks all four example configs.
 - **Derived mechanisms** are built from primitives via configuration. They
   provide real value but introduce no new irreducible ideas.
 - **Everything else** is either deployment-specific (tmux, Dolt, git
   worktrees), a configured role (witness, refinery, deacon), or
   design/future work (federation, Mol Mall).
+
+### The Substrate Layering Principle
+
+The 5+4 concepts form a strict layer cake. Each layer builds only on the
+layers below it — nothing in a lower layer references anything higher.
+
+```
+Layer 4: Dispatch/Coordination  — Sling + Convoys + Health Patrol
+Layer 3: Workflow Engine        — Formulas + Molecules + Plugins
+Layer 2: Messaging              — Mail + Nudge + Protocol Messages
+Layer 1: Rich Semantics         — Hooks, dependencies, labels, pool management, template rendering
+Layer 0: Core Interfaces        — Agent Protocol + Task Store + Event Bus + Config + Prompt Templates
+```
+
+**Five invariants that must hold:**
+1. No layer may import from a higher layer
+2. Each layer exposes a clean public API consumed by the layer above
+3. Layer 0 has zero Gas City-specific logic (pure interfaces)
+4. Removing any layer above 0 leaves the layers below fully functional
+5. Side effects (I/O, process spawning) are confined to Layer 0 implementations
 
 ---
 
@@ -68,20 +90,31 @@ Every higher concept assumes agents exist and can be controlled.
 
 **What it absorbs from Gas Town:**
 - **Agent Identity** — `AgentIdentity` struct (workspace/project/name/instance)
-  is part of the protocol, not a separate concept.
+  is part of the protocol, not a separate concept. Identity supports a
+  **dual attribution model**: agent identity (`BD_ACTOR`) for executor
+  attribution and debugging, and owner identity (`GIT_AUTHOR_EMAIL`) for
+  human credit and compliance. Agents execute; humans own.
 - **Session Management** — `SessionConfig` (tmux patterns, work dirs) is
   protocol configuration, not a standalone system.
 - **Name Pool** — `PoolConfig` (themes, allocation, overflow) is pool
   management within the protocol.
 - **Polecat/Crew/Dog distinction** — All are agents with different config
   (ephemeral flag, pool settings, scope). The protocol doesn't know or care.
+  Ephemeral agents (polecats) follow a **three-layer architecture**: (1)
+  Identity is permanent (agent bead, work history — survives across
+  sessions; full CV/skill derivation is future work, see §7 Ledger Export), (2) Sandbox is per-assignment (worktree + branch — created per
+  issue, destroyed on completion), (3) Session is per-step (Claude instance +
+  context window — may restart within an assignment). There is **no idle
+  state** — ephemeral agents are spawned WITH work and destroyed WHEN done.
 - **Handoff/Seance** — Session resume is a provider capability (`ResumeConfig`),
-  not a separate mechanism.
+  not a separate mechanism. Handoff enables indefinitely long workflows
+  despite finite context windows — each new session resumes at the current
+  molecule step.
 - **Session Checkpoints** — Crash recovery via the `Adopter` interface, which
   is an optional protocol extension.
 
 **Removal test:** Remove Agent Protocol → can't start agents, can't send
-prompts, can't detect liveness. Nothing works. **Fails for all three configs.**
+prompts, can't detect liveness. Nothing works. **Fails for all four configs.**
 
 ---
 
@@ -96,6 +129,7 @@ CRUD on work units with hooks, dependencies, labels, and concurrent access.
 ```
 Create / Get / Update / Close         — CRUD on beads
 Hook / Unhook / Pin                   — atomic work claiming
+GetHook(agentID) → *Bead             — query hooked work (health patrol recovery)
 AddDependency / GetDependencies       — relationship graph
 Query (by status, labels, assignee)   — fast state queries
 ```
@@ -104,6 +138,13 @@ Query (by status, labels, assignee)   — fast state queries
 assignments, no status, no history, no dependencies. Agents could run but
 couldn't coordinate — they'd have nothing to claim, nothing to close,
 nothing to query.
+
+**Interface requirement — concurrent write safety:** Any Task Store backend
+must handle N agents writing simultaneously. Gas Town uses Dolt's
+branch-per-agent for write isolation (tested clean with 50 concurrent
+writers). Other backends need equivalent strategies (row-level locking,
+optimistic concurrency, serializable transactions). This is a functional
+requirement of the Task Store interface, not just a deployment detail.
 
 **What it absorbs from Gas Town:**
 - **Hook System** — `Hook()` / `Unhook()` are task store operations. The
@@ -122,7 +163,7 @@ nothing to query.
   deployment concern of the task store backend.
 
 **Removal test:** Remove Task Store → can't track work, can't assign issues,
-can't record state. Agents run in a void. **Fails for all three configs.**
+can't record state. Agents run in a void. **Fails for all four configs.**
 
 ---
 
@@ -144,6 +185,11 @@ Query(timeRange, filters)             — historical lookup
 Health monitoring can't detect stalls. Plugins can't trigger on conditions.
 The daemon can't provide transparency. You'd have to poll beads for every
 state change — which is what events eliminate.
+
+**Interface requirement — concurrent append safety:** Multiple agents publish
+events simultaneously. Any Event Bus implementation must guarantee concurrent
+append safety (Gas Town uses `flock`; alternatives include write-ahead logs
+or message broker guarantees).
 
 **What it absorbs from Gas Town:**
 - **Activity feed** — `bd activity --follow` is a subscriber to the event bus.
@@ -184,7 +230,9 @@ an application.
 - **Property layers** — Config resolution order (wisp/rig/town/system) is
   the config system's override mechanism.
 - **Progressive capability model** — Levels 0-8 are determined by which
-  config sections are present. This IS the config system's activation logic.
+  config sections are present. Each level is independently useful and
+  deployable — you don't need level 8 to get value from level 1. This IS
+  the config system's activation logic.
 - **Claude Code hooks config** — Hook configuration per role is part of the
   agent config, not a separate system.
 - **Rig config** — Per-project identity, prefixes, and remotes are `[projects]`
@@ -248,7 +296,9 @@ violates "zero hardcoded roles." **Fails for ccat.toml and gastown.toml**
 Agent Protocol and Event Bus depend on nothing. Task Store depends on
 Config (for `data_dir`) and Event Bus (for change notifications). Config
 depends on nothing. Prompt Templates depend on Config (for template
-variables). The dependency graph is a DAG.
+variables). The dependency graph is a DAG. All five sit at Layer 0 as
+core interfaces; intra-layer dependencies (e.g., Task Store → Config,
+Task Store → Event Bus) are permitted within Layer 0.
 
 ---
 
@@ -273,7 +323,14 @@ no new irreducible ideas.
 - Nudge system (tmux `send-keys` with 500ms debounce)
 - Protocol Messages (typed mail: `POLECAT_DONE`, `MERGE_READY`, etc.)
 - Groups, Queues, Channels (beads-native messaging primitives)
-- Escalation System (severity-based routing via mail + config)
+- Escalation System (severity-based routing: low→labels only,
+  medium→mail to overseer, high→mail + external notification,
+  critical→all channels + immediate attention)
+
+**Implementation note — signal rate-limiting:** Any `SendPrompt`
+implementation needs rate-limiting (Gas Town uses 500ms debounce) to prevent
+rapid-fire nudges from overwhelming an agent. This is not tmux-specific —
+it's a general concern for any immediate-delivery signal mechanism.
 
 **Why it's derived, not core:** Mail is literally "beads with type=message."
 Nudge is literally "call SendPrompt on a running agent." Protocol messages
@@ -293,16 +350,28 @@ patterns over message beads. No new primitive is needed — just composition.
 - Prompt Templates — step instructions rendered at execution time
 
 **What it provides:** Reusable multi-step workflow patterns.
-- **Formula** — static TOML template defining steps
-- **Molecule** — instantiated formula: root bead + step child beads
+- **Formula** — static TOML template defining steps (4 types: workflow,
+  convoy, expansion for issue decomposition, aspect for cross-cutting concerns)
+- **Molecule** — instantiated formula: root bead + step child beads.
+  Three-phase lifecycle: Formula (static template) → Protomolecule (formula
+  bound to issue but not yet crystallized — important for transactional
+  safety) → Molecule (fully instantiated with root + step beads)
 - **Step navigation** — `mol next` / `bd close --continue` advances steps
+- **Formula health-checking** — SHA256 checksums track installed formulas.
+  `CheckFormulaHealth()` detects: ok, outdated, modified, missing, new,
+  untracked. Safe updates preserve user-modified formulas while upgrading
+  system defaults
 
 **Gas Town features it replaces:**
 - Formulas (4 types: workflow, convoy, expansion, aspect)
 - Molecules (formula → protomolecule → molecule lifecycle)
 - Wisps (ephemeral molecules — just molecules with a TTL/auto-delete flag)
 - Formula Resolution (rig → town → embedded → Mol Mall discovery order)
-- Plugins (markdown + TOML frontmatter + gate conditions)
+- Plugins (markdown + TOML frontmatter + gate conditions). Plugins have a
+  full lifecycle: **gate evaluation** (5 types: cooldown/cron/condition/event/manual)
+  runs in a periodic evaluation loop, **wisp execution** creates an ephemeral
+  bead and dispatches it to a pool agent via nudge, and **tracking** handles
+  labels, digest, and failure notifications
 
 **Why it's derived, not core:** A molecule is a parent bead with child beads
 linked by `parent` dependencies. Step navigation is "close current child,
@@ -340,8 +409,12 @@ assignment flow.
 6. Log event (Event Bus)
 
 No step requires a new primitive. Convoys are tracking beads with `tracks`
-dependencies — pure Task Store. Swarms are convoys with shared branches —
-deployment-specific (Git), not a new concept.
+dependencies — pure Task Store. Convoys use a **redundant observation
+pattern**: Witness, Refinery, and Daemon all independently check convoy
+completion on every relevant event. All checks are idempotent — running
+them multiple times is safe. This is NDI in practice: multiple independent
+observers converge on correct state. Swarms are convoys with shared
+branches — deployment-specific (Git), not a new concept.
 
 **Derivation proof:** `Sling(issue, rig)` = `agent := Pool.GetOrSpawn()` +
 `mol := Formula.Bond(issue)` + `TaskStore.Hook(agent, mol)` +
@@ -358,7 +431,19 @@ deployment-specific (Git), not a new concept.
 - Task Store — stale hook detection (work-on-hook + dead agent)
 
 **What it provides:** Self-healing through continuous monitoring, stall
-detection, and automatic recovery.
+detection, and automatic recovery. Includes a **self-cleaning model** for
+ephemeral agents: (1) agent finishes → signals DONE to lifecycle monitor,
+(2) monitor verifies cleanup (checks all remotes before delete), (3) sends
+MERGE_READY to merge processor, (4) after merge confirmation, nukes agent
+sandbox. Safety verification at each step prevents data loss (uses
+Messaging (6) for inter-agent coordination).
+
+**Design principle — deterministic shutdown:** Agent shutdown operations
+use deterministic code (Go state machines), NOT AI agents. This prevents
+the "AI trying to shut down another AI" problem. Gas Town's "Dance Dogs"
+are lightweight goroutines with `Warrant` structs and explicit state
+transitions — mechanical, not intelligent. Some infrastructure operations
+must be deterministic to be safe.
 
 **Gas Town features it replaces:**
 - Daemon heartbeat cycle (15 checks per cycle)
@@ -396,18 +481,15 @@ over the five primitives. No mechanism requires introducing a 6th primitive.
 
 Four canonical flows showing how primitives compose into system behavior.
 
-### Flow 1: Single Task (ralph.toml level)
+### Flow 1: Single Task (hello-world.toml level)
 
-The simplest possible flow. One agent, one task, no messaging.
+The simplest possible flow. One agent, one task, no messaging, no loop.
 
 ```
 User                    TaskStore           Agent Protocol
   │                        │                      │
   ├─ bd create "fix bug" ──►                      │
   │                  [bead created]                │
-  │                        │                      │
-  │                        ◄── poll (loop) ───────┤
-  │                  [find ready bead]             │
   │                        │                      │
   │                        ├── Hook(agent, bead) ──►
   │                  [agent claims work]           │
@@ -418,8 +500,11 @@ User                    TaskStore           Agent Protocol
   │                  [bead closed]                 │
 ```
 
-**Primitives used:** Agent Protocol, Task Store, Config (loop settings).
+**Primitives used:** Agent Protocol, Task Store, Config.
 **Mechanisms used:** None. This flow predates all derived mechanisms.
+
+> **ralph.toml adds `[agents.loop]`:** after closing a bead, the agent
+> loops back to poll for the next one, each time with a clean context.
 
 ---
 
@@ -526,7 +611,7 @@ deployments provide backends.
 
 | Primitive | Gas Town Implementation | Alternative Implementations |
 |-----------|------------------------|----------------------------|
-| **Agent Protocol** | tmux + Claude Code | Docker containers, Agent SDK, subprocess, remote SSH |
+| **Agent Protocol** | tmux + Claude Code | Agent SDK, subprocess, remote SSH |
 | **Task Store** | Dolt SQL (branch-per-agent) | SQLite, filesystem, Postgres, in-memory |
 | **Event Bus** | JSONL file + flock | In-process channels, Redis pub/sub, NATS |
 | **Config** | TOML files + property layers | Environment variables, API-served config |
@@ -534,7 +619,7 @@ deployments provide backends.
 
 **The pluggability invariant:** Swapping any implementation preserves all
 derived mechanisms. If you replace Dolt with SQLite, mail still works
-(it's still beads). If you replace tmux with Docker, nudge still works
+(it's still beads). If you replace tmux with subprocess, nudge still works
 (it's still `SendPrompt`). The mechanisms are defined in terms of primitive
 interfaces, not implementations.
 
@@ -542,7 +627,7 @@ interfaces, not implementations.
 
 | Primitive | Default Provider | Shipped Alternatives |
 |-----------|-----------------|---------------------|
-| Agent Protocol | `claude` (tmux-based) | `subprocess` (stdin/stdout) |
+| Agent Protocol | `claude`, `codex`, `gemini` (all tmux-based) | `subprocess` (stdin/stdout) |
 | Task Store | `beads` (Dolt/SQLite) | `filesystem` (JSONL files) |
 | Event Bus | JSONL + flock | (single impl, extensible) |
 | Config | TOML parser | (single impl, standard) |
@@ -550,13 +635,36 @@ interfaces, not implementations.
 
 ---
 
-## 6. Three Configs, One SDK
+## 6. Four Configs, One SDK
 
-The three example configs shipped with Gas City are different selections
+The four example configs shipped with Gas City are different selections
 from the same 5+4 concepts. They demonstrate progressive capability —
-not different SDKs, but different activation levels.
+not different SDKs, but different activation levels. Each level is
+independently useful and deployable on its own.
 
-### ralph.toml — Single Agent (Primitives 1-4 only)
+### hello-world.toml — Single Agent, Single Session (Primitives 1-2, 4 only)
+
+```
+Primitives active:  Agent Protocol, Task Store, Config
+Mechanisms active:  None
+Capability level:   1 (workspace + agent + tasks)
+```
+
+What it uses:
+- **Agent Protocol** — one agent, auto-detected provider
+- **Task Store** — beads backend for tracking work
+- **Config** — workspace name, agent definition (`[workspace]` + `[[agents]]` + `[tasks]`)
+
+What it skips:
+- No loop — user creates beads, agent works them in a single session
+- No Prompt Templates (single agent, no role differentiation needed)
+- No Event Bus (no monitoring, no subscriptions)
+- No Messaging (one agent, no one to message)
+- No Formulas (flat tasks, no multi-step workflows)
+- No Dispatch (no pool, no spawning)
+- No Health Patrol (no daemon, no monitoring)
+
+### ralph.toml — Single Agent + Loop (Adds `[agents.loop]`)
 
 ```
 Primitives active:  Agent Protocol, Task Store, Config, (no templates needed)
@@ -564,10 +672,12 @@ Mechanisms active:  None
 Capability level:   2 (agent + tasks + loop)
 ```
 
-What it uses:
-- **Agent Protocol** — one agent, auto-detected provider
-- **Task Store** — beads backend for tracking work
-- **Config** — workspace name, agent definition, loop settings
+What it adds over hello-world:
+- **Loop** — `[agents.loop]` config turns the agent into a polling loop.
+  Each bead is a separate run through the agent with a **clean context**.
+  The loop is what distinguishes ralph from hello-world: the agent
+  continuously polls for ready beads, claims one, executes it in a fresh
+  session, then loops back.
 - **Event Bus** — not configured (no `[daemon]`), but available passively
 
 What it skips:
@@ -577,7 +687,7 @@ What it skips:
 - No Dispatch (no pool, no spawning, just a poll loop)
 - No Health Patrol (no daemon, no monitoring)
 
-### ccat.toml — Coordinator + Workers (Adds Mechanisms 6, 8)
+### ccat.toml — Coordinator + Workers / Claude Code Agent Teams (Adds Mechanisms 6, 8)
 
 ```
 Primitives active:  All five (Agent Protocol, Task Store, Event Bus, Config, Templates)
@@ -614,13 +724,15 @@ What it adds over ccat:
 Each config is a strict superset of the previous:
 
 ```
-ralph     = {AgentProtocol, TaskStore, Config}
+hello     = {AgentProtocol, TaskStore, Config}
+ralph     = hello + {Config: agents.loop (clean context per bead)}
 ccat      = ralph + {EventBus, Templates, Messaging, Dispatch}
 gastown   = ccat + {Formulas, HealthPatrol}
 ```
 
 No config requires a concept that isn't in the 5+4 set. No config requires
-a concept that can't be derived from the five primitives.
+a concept that can't be derived from the five primitives. Each config is
+independently useful — hello-world runs real work, not just a demo stub.
 
 ---
 
@@ -665,7 +777,7 @@ deployment-specific, or identified as future/design work.
 | Formulas | Formulas/Molecules (7) | TOML templates parsed by config system |
 | Molecules | Formulas/Molecules (7) | Root bead + child step beads in task store |
 | Wisps | Formulas/Molecules (7) | Molecules with ephemeral/auto-delete flag |
-| Plugins | Formulas/Molecules (7) | Formulas with gate conditions on event bus |
+| Plugins | Formulas/Molecules (7) + Health Patrol (9) + Config (4) | Gate-evaluated (cooldown/cron/condition/event/manual) formulas with ephemeral wisp execution and pool dispatch. Full lifecycle: gate evaluation loop → wisp bead creation → pool dispatch + nudge → tracking via labels/digest/failure notifications. CLI: `gc plugin {list, run, disable, enable, status}` |
 | Formula Resolution | Formulas/Molecules (7) | Config resolution order for formula discovery |
 | Sling | Dispatch (8) | Composed: spawn + bond + hook + nudge + log |
 | Convoys | Dispatch (8) | Tracking beads with `tracks` dependencies |
@@ -689,7 +801,7 @@ deployment-specific, or identified as future/design work.
 | Filesystem Conventions (`~/gt/`) | One possible directory layout |
 | Beads Redirects | Dolt/worktree-specific shared DB access |
 | Branch-per-Polecat | Dolt-specific write isolation strategy |
-| Integration Branches | Git-specific multi-agent landing strategy |
+| Integration Branches | Git-specific multi-agent landing strategy. Three-layer safety guardrails: (1) formula/role instructions tell agents which branch to target, (2) pre-push hook validates branch targeting, (3) only the merge processor's code path can push to main |
 | Claude Code Hooks | One possible agent tool integration |
 | `tmux send-keys` debounce | tmux-specific nudge implementation detail |
 | Dolt server health | Dolt-specific infrastructure monitoring |
@@ -717,8 +829,8 @@ These are all just `[[agents]]` entries with different `role`, `scope`,
 |------------------|--------|
 | Federation (HOP) | Future: multi-workspace coordination protocol |
 | Mol Mall | Future: formula registry/marketplace |
-| Ledger Export | Future: data plane transitions (L0→L2→L3) |
-| Data Fidelity Levels | Future: operational vs. audit vs. ground truth |
+| Ledger Export | Future: three data planes (Operational for live queries, Ledger for audit/compliance, Design for cross-workspace ideas) with trigger-based transitions (bead closure→L2 compressed record, convoy completion→L2 summary, refinery merge→L2 outcome, design decision→L3 full-fidelity reasoning capture). CV and skill derivation built on the Ledger plane |
+| Data Fidelity Levels | Future: L0 ephemeral noise (KRC auto-prunes), L1 operational state (fast access), L2 compressed completion records (audit trail), L3 full-fidelity ground truth (skill derivation, CV building) |
 | `gt doctor` | Tooling: diagnostic command, not a core concept |
 
 ### Cross-Cutting Principles (Design Philosophy, Not Concepts)
@@ -743,8 +855,8 @@ Every requirement from `gas-city-vision.md` is addressed by the 5+4 core.
 |---|-------------------|--------------|
 | 1 | Orchestration-builder toolkit (not just an orchestrator) | Config (4) + Prompt Templates (5) — behavior is user-supplied |
 | 2 | Next step beyond Gas Town | All 5+4 — Gas Town is one configuration of the SDK |
-| 3 | Multiple architectures/topologies | Config (4) — ralph, ccat, gastown are different topologies |
-| 4 | Progressive capability model | Config (4) — levels 0-8 from config section presence |
+| 3 | Multiple architectures/topologies | Config (4) — hello-world, ralph, ccat (Claude Code Agent Teams), gastown are different topologies |
+| 4 | Progressive capability model | Config (4) — levels 0-8 from config section presence; each level independently useful |
 | 5 | Reasonable defaults, configure what you need | Config (4) — defaults table in §3.3 |
 | 6 | Create your own roles, teams, coordination rules | Prompt Templates (5) + Config (4) |
 | 7 | Roles external to code | Prompt Templates (5) — `roles/*.md.tmpl` files |
@@ -772,7 +884,7 @@ build Gas Town, Claude Code Agent Teams, or Ralph.
 - Every Gas Town concept in the 45-concept inventory maps to either a
   primitive, a mechanism, a deployment detail, or a configured role.
 - No Gas Town concept requires an idea outside the 5+4 set.
-- The three example configs exercise all 5+4 concepts at different levels.
+- The four example configs exercise all 5+4 concepts at different levels.
 
 **Irreducibility (no concept is derivable from the others):**
 - Agent Protocol can't be built from Task Store + Event Bus (you need

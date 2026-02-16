@@ -36,7 +36,10 @@ From https://steve-yegge.medium.com/steveys-birthday-blog-34f437139cb5:
 - GC builds up higher level concepts on lower level concepts, e.g the mail
   system is built on top of the beads system. The core principles are clearly
   visible and intrinsic whereas the higher level concepts are built up with
-  configuration.
+  configuration. A concept is "core" if removing it makes the implementation
+  of GT on top of GC impossible. A concept is "derived" if it can be built on
+  top of lower level concepts. The layers of GC are built such that each of the
+  derived concepts are built on top of the concepts from the levels below.
 
 - GC is completely transparent and can be traced via the deamon that provides a
   websocket that shows the historical data and streaming changes to data, e.g.
@@ -45,5 +48,6 @@ From https://steve-yegge.medium.com/steveys-birthday-blog-34f437139cb5:
 - Every AI coding agent — regardless of implementation — is accessed through a
   uniform "factory worker" abstraction. This decouples the orchestration logic
   from any specific coding agent (Claude Code, Codex, Gemini, OpenCode, etc) or
-  execution substrate (tmux, Agent SDK, custom code). The rest of the
-  SDK builds exclusively on this abstraction.
+  execution substrate (tmux, Agent SDK, custom code). The rest of the SDK builds
+  on this abstraction and does NOT depend on any of the implementation details
+  of the underlying agents themselves.
