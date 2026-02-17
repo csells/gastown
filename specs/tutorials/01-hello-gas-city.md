@@ -14,7 +14,7 @@ out the context before it rots. A fresh session queries beads and picks up right
 where the last one left off. The state is in the store, not in the agent's head.
 
 This tutorial builds the simplest possible Gas City orchestration: a named agent
-(the "Mayor") to capture the work, an anonymouse coding agent to build it and
+(the "Mayor") to capture the work, an anonymous coding agent to build it and
 the beads system that ties it all together.
 
 ---
@@ -238,7 +238,7 @@ This tutorial used three of Gas City's five primitives:
 
 The other two primitives (Event Bus and Prompt Templates) aren't needed yet.
 They show up when you have multiple agents that need to observe each other and
-play different roles. That's [Tutorial 03](03-agent-team.md).
+play different roles. That's [Tutorial 04](04-agent-team.md).
 
 ---
 
